@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "panda2prusa"
+version = "1.0.0"
+description = "Convert Bambu Studio / OrcaSlicer .3mf projects to PrusaSlicer .3mf — transforms, multicolor painting, and per-part extruders preserved"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Joseph (CupsOhJoe)", email = "cupsohjoe@gmail.com" }]
+requires-python = ">=3.9"
+dependencies = ["lxml>=4.9"]
+keywords = ["3mf", "bambu", "prusa", "prusaslicer", "bambustudio", "orcaslicer", "3d-printing"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Multimedia :: Graphics :: 3D Modeling",
+]
+
+[project.urls]
+Homepage = "https://github.com/CupsOhJoe/panda2prusa"
+Issues = "https://github.com/CupsOhJoe/panda2prusa/issues"
+
+[project.scripts]
+panda2prusa = "panda2prusa.cli:main"
+
+[project.gui-scripts]
+panda2prusa-gui = "panda2prusa.gui:main"
+
+[tool.setuptools]
+packages = ["panda2prusa"]

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+out_*.3mf
+*_prusa.3mf
+.pytest_cache/
+build/
+dist/
+*.spec
+samples/
+*.egg-info/

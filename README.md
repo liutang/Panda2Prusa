@@ -3,6 +3,8 @@
 **Bambu Studio → PrusaSlicer, nothing lost in translation.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/CupsOhJoe/Panda2Prusa/total?label=downloads)](https://github.com/CupsOhJoe/Panda2Prusa/releases)
+[![Stars](https://img.shields.io/github/stars/CupsOhJoe/Panda2Prusa?style=flat&label=stars)](https://github.com/CupsOhJoe/Panda2Prusa/stargazers)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-ffdd00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/cupsohjoe)
 
 Convert **Bambu Studio / OrcaSlicer** `.3mf` project files into **PrusaSlicer**-compatible

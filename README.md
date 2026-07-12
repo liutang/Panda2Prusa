@@ -3,7 +3,7 @@
 **Bambu Studio → PrusaSlicer, nothing lost in translation.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-ffdd00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/cupsohjoem)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-support-ffdd00?logo=buymeacoffee&logoColor=black)](https://www.buymeacoffee.com/cupsohjoe)
 
 Convert **Bambu Studio / OrcaSlicer** `.3mf` project files into **PrusaSlicer**-compatible
 `.3mf` files, preserving:
@@ -98,4 +98,4 @@ shows the problem.
 ## Support
 
 If this saved your print (or your sanity), you can
-[buy me a coffee](https://www.buymeacoffee.com/cupsohjoem). ☕
+[buy me a coffee](https://www.buymeacoffee.com/cupsohjoe). ☕

@@ -1,0 +1,14 @@
+services:
+  panda2prusa:
+    image: ghcr.io/liutang/panda2prusa:latest
+    build: .  # used only if the image can't be pulled
+    container_name: panda2prusa
+    ports:
+      - "8543:8543"
+    environment:
+      # Largest .3mf accepted, in MB.
+      P2P_MAX_UPLOAD_MB: "300"
+    tmpfs:
+      - /tmp
+    read_only: true
+    restart: unless-stopped

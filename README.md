@@ -44,6 +44,45 @@ pip install -r requirements.txt
 
 (Requires Python 3.9+. `tkinter` ships with the standard Python installer for the GUI.)
 
+## Web app (Docker / homelab)
+
+A browser front end runs in a container on port **8543**. Drop in a `.3mf`, pick plates,
+map filaments to extruders (with color swatches), and download the converted file.
+
+A prebuilt multi-arch image (amd64/arm64) is published to GHCR on every push to `main`:
+
+```
+docker run -d --name panda2prusa -p 8543:8543 --restart unless-stopped ghcr.io/liutang/panda2prusa:latest
+# then open http://<host>:8543
+```
+
+Or with the included `compose.yaml` (just that file is enough on the host):
+
+```
+docker compose up -d
+```
+
+To build the image yourself instead: `docker build -t panda2prusa .`
+
+The app is stateless: uploads are converted in a temp directory and deleted as soon as
+the response is sent. There's no authentication, so keep it on your LAN or put it behind a
+reverse proxy that handles auth.
+
+| Env var             | Default | Purpose                      |
+|---------------------|---------|------------------------------|
+| `P2P_PORT`          | `8543`  | Port to listen on            |
+| `P2P_MAX_UPLOAD_MB` | `300`   | Largest `.3mf` accepted (MB) |
+
+Endpoints: `GET /healthz`, `POST /api/inspect`, `POST /api/convert`; interactive API
+docs are at `/api/docs`.
+
+To run it without Docker:
+
+```
+pip install -r requirements-web.txt
+python -m panda2prusa.web
+```
+
 ## Usage
 
 CLI:

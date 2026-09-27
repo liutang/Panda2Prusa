@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Panda2Prusa</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐼</text></svg>">
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1d2330; --muted: #677084;
+    --border: #dde1e8; --accent: #e8631a; --accent-text: #ffffff;
+    --ok: #1f8a4c; --err: #c0392b; --drop: #fbfcfd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171c; --card: #1d2128; --text: #e6e9ef; --muted: #98a1b3;
+      --border: #313744; --accent: #f47a36; --accent-text: #14171c;
+      --ok: #4cc07f; --err: #ef6a5b; --drop: #191c22;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 48px; }
+  header h1 { margin: 0; font-size: 26px; }
+  header p { margin: 4px 0 24px; color: var(--muted); }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin-bottom: 16px;
+  }
+  .card h2 { margin: 0 0 12px; font-size: 16px; }
+  #drop {
+    display: block; border: 2px dashed var(--border); border-radius: 12px; background: var(--drop);
+    padding: 36px 16px; text-align: center; cursor: pointer; transition: border-color .15s;
+  }
+  #drop:hover, #drop.over { border-color: var(--accent); }
+  #drop strong { display: block; font-size: 17px; margin-bottom: 4px; }
+  #drop span { color: var(--muted); }
+  #file { display: none; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+    border: 1px solid var(--border); border-radius: 999px; cursor: pointer; user-select: none;
+  }
+  .chip input { margin: 0; accent-color: var(--accent); }
+  .muted { color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 6px 4px; border-top: 1px solid var(--border); }
+  tr:first-child td { border-top: 0; }
+  .sw {
+    display: inline-block; width: 20px; height: 20px; border-radius: 5px;
+    border: 1px solid var(--border); vertical-align: middle;
+  }
+  input[type=number] {
+    width: 64px; padding: 5px 8px; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--border); border-radius: 6px;
+  }
+  input[type=number]:disabled { opacity: .5; }
+  .modes { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 12px; }
+  .modes label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+  .modes input { accent-color: var(--accent); }
+  button {
+    font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 12px 20px; cursor: pointer;
+    background: var(--accent); color: var(--accent-text); width: 100%;
+  }
+  button:disabled { opacity: .55; cursor: progress; }
+  .msg { margin-top: 12px; padding: 10px 14px; border-radius: 8px; border: 1px solid var(--border); }
+  .msg.ok { border-color: var(--ok); }
+  .msg.err { border-color: var(--err); color: var(--err); }
+  .msg a { color: var(--accent); font-weight: 600; }
+  .hint { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+  footer { text-align: center; color: var(--muted); font-size: 13px; margin-top: 24px; }
+  footer a { color: inherit; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>🐼 Panda2Prusa</h1>
+    <p>Convert Bambu Studio / OrcaSlicer <code>.3mf</code> projects to PrusaSlicer.</p>
+  </header>
+
+  <label id="drop" class="card" for="file">
+    <strong id="drop-title">Drop a .3mf file here</strong>
+    <span id="drop-sub">or click to choose one</span>
+    <input id="file" type="file" accept=".3mf">
+  </label>
+  <div id="load-msg" class="msg err" hidden></div>
+
+  <section id="details" hidden>
+    <div class="card">
+      <h2>Project</h2>
+      <dl id="summary"></dl>
+    </div>
+
+    <div class="card" id="plates-card">
+      <h2>Plates</h2>
+      <div class="chips" id="plates"></div>
+      <p class="hint">Leave all selected to convert every plate.</p>
+    </div>
+
+    <div class="card" id="map-card">
+      <h2>Filament → extruder mapping</h2>
+      <div class="modes">
+        <label><input type="radio" name="mode" value="custom" checked> Map to extruders</label>
+        <label><input type="radio" name="mode" value="keep"> Keep original numbers</label>
+      </div>
+      <table><tbody id="filaments"></tbody></table>
+      <p class="hint">PrusaSlicer only shows multiple colors under a printer profile with multiple
+        extruders/tools (MMU3, XL 2T/5T…).</p>
+    </div>
+
+    <div class="card">
+      <button id="convert">Convert &amp; download</button>
+      <div id="result" class="msg" hidden></div>
+    </div>
+  </section>
+
+  <footer>
+    Panda2Prusa <span id="version"></span> ·
+    <a href="https://github.com/CupsOhJoe/Panda2Prusa" target="_blank" rel="noopener">upstream project</a>
+  </footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null;   // the File
+let info = null;      // /api/inspect response
+let lastUrl = null;
+
+fetch("api/config").then(r => r.json()).then(c => {
+  $("version").textContent = "v" + c.version;
+  $("drop-sub").textContent = `or click to choose one (max ${c.max_upload_mb} MB)`;
+}).catch(() => {});
+
+const drop = $("drop");
+["dragenter", "dragover"].forEach(e => drop.addEventListener(e, ev => {
+  ev.preventDefault(); drop.classList.add("over");
+}));
+["dragleave", "drop"].forEach(e => drop.addEventListener(e, ev => {
+  ev.preventDefault(); drop.classList.remove("over");
+}));
+drop.addEventListener("drop", ev => { if (ev.dataTransfer.files[0]) load(ev.dataTransfer.files[0]); });
+$("file").addEventListener("change", ev => { if (ev.target.files[0]) load(ev.target.files[0]); });
+
+async function errorText(resp) {
+  try { return (await resp.json()).error || resp.statusText; } catch { return resp.statusText; }
+}
+
+function el(tag, props = {}, ...kids) {
+  const n = Object.assign(document.createElement(tag), props);
+  n.append(...kids);
+  return n;
+}
+
+async function load(file) {
+  current = file; info = null;
+  $("details").hidden = true; $("load-msg").hidden = true; $("result").hidden = true;
+  $("drop-title").textContent = `Reading ${file.name}…`;
+  const fd = new FormData(); fd.append("file", file);
+  try {
+    const resp = await fetch("api/inspect", { method: "POST", body: fd });
+    if (!resp.ok) throw new Error(await errorText(resp));
+    info = await resp.json();
+  } catch (e) {
+    $("drop-title").textContent = "Drop a .3mf file here";
+    $("load-msg").textContent = e.message; $("load-msg").hidden = false;
+    return;
+  }
+  $("drop-title").textContent = file.name;
+  render();
+}
+
+function render() {
+  const s = $("summary"); s.replaceChildren();
+  const rows = [
+    ["File", info.filename],
+    ["Producer", info.producer || "unknown"],
+    ["Model parts", info.model_parts],
+    ["Build items", info.build_items],
+    ["Painted triangles", info.painted_triangles.toLocaleString()],
+  ];
+  for (const [k, v] of rows) s.append(el("dt", { textContent: k }), el("dd", { textContent: v }));
+
+  const p = $("plates"); p.replaceChildren();
+  $("plates-card").hidden = info.plates.length < 2;
+  for (const pl of info.plates) {
+    const cb = el("input", { type: "checkbox", checked: true, value: pl.id });
+    p.append(el("label", { className: "chip" }, cb,
+      `Plate ${pl.id}`, el("span", { className: "muted", textContent: `· ${pl.objects} obj` })));
+  }
+
+  const f = $("filaments"); f.replaceChildren();
+  const single = info.filaments.length < 2 && (info.filaments.length === 0 || info.filaments[0].slot === 1);
+  $("map-card").hidden = single;
+  for (const fil of info.filaments) {
+    const sw = el("span", { className: "sw" });
+    if (fil.color) sw.style.background = fil.color;
+    const label = `Bambu filament ${fil.slot}` + (fil.type ? ` · ${fil.type}` : "") + (fil.color ? ` ${fil.color}` : "");
+    const num = el("input", { type: "number", min: 1, max: 32, value: info.suggested_map[fil.slot] });
+    num.dataset.slot = fil.slot;
+    f.append(el("tr", {}, el("td", { style: "width:32px" }, sw), el("td", { textContent: label }),
+      el("td", { textContent: "→ extruder", className: "muted" }), el("td", { style: "text-align:right" }, num)));
+  }
+  syncMode();
+  $("details").hidden = false;
+}
+
+function mode() { return document.querySelector("input[name=mode]:checked").value; }
+function syncMode() {
+  document.querySelectorAll("#filaments input").forEach(i => { i.disabled = mode() === "keep"; });
+}
+document.querySelectorAll("input[name=mode]").forEach(r => r.addEventListener("change", syncMode));
+
+$("convert").addEventListener("click", async () => {
+  const res = $("result"); res.hidden = true; res.className = "msg";
+  const fd = new FormData();
+  fd.append("file", current);
+
+  const boxes = [...document.querySelectorAll("#plates input")];
+  const chosen = boxes.filter(b => b.checked).map(b => b.value);
+  if (boxes.length && !chosen.length) return show("err", "Select at least one plate.");
+  fd.append("plates", chosen.length === boxes.length ? "all" : chosen.join(","));
+
+  if ($("map-card").hidden) {
+    fd.append("mapping_mode", "auto");
+  } else if (mode() === "keep") {
+    fd.append("mapping_mode", "keep");
+  } else {
+    const map = {};
+    for (const i of document.querySelectorAll("#filaments input")) {
+      const v = parseInt(i.value, 10);
+      if (!(v >= 1)) return show("err", `Extruder for filament ${i.dataset.slot} must be a number ≥ 1.`);
+      map[i.dataset.slot] = v;
+    }
+    fd.append("mapping_mode", "custom");
+    fd.append("mapping", JSON.stringify(map));
+  }
+
+  const btn = $("convert");
+  btn.disabled = true; btn.textContent = "Converting…";
+  try {
+    const resp = await fetch("api/convert", { method: "POST", body: fd });
+    if (!resp.ok) throw new Error(await errorText(resp));
+    const stats = JSON.parse(resp.headers.get("X-Panda2Prusa-Stats") || "{}");
+    const blob = await resp.blob();
+    if (lastUrl) URL.revokeObjectURL(lastUrl);
+    lastUrl = URL.createObjectURL(blob);
+    const a = el("a", { href: lastUrl, download: info.output_name, textContent: info.output_name });
+    a.click();
+    let text = `Done: ${stats.objects_written} objects, ${stats.volumes_written} volumes, ` +
+      `${stats.build_items_written} build items, ${(stats.painted_triangles || 0).toLocaleString()} painted triangles.`;
+    if (stats.extruder_map && Object.keys(stats.extruder_map).length)
+      text += " Extruders: " + Object.entries(stats.extruder_map).map(([k, v]) => `${k}→${v}`).join(", ") + ".";
+    res.replaceChildren(text, el("br"), "Download didn't start? ", a);
+    res.classList.add("ok"); res.hidden = false;
+  } catch (e) {
+    show("err", e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = "Convert & download";
+  }
+
+  function show(kind, text) { res.textContent = text; res.classList.add(kind); res.hidden = false; }
+});
+</script>
+</body>
+</html>

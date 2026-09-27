@@ -11,6 +11,9 @@ license = { file = "LICENSE" }
 authors = [{ name = "Joseph (CupsOhJoe)", email = "cupsohjoe@gmail.com" }]
 requires-python = ">=3.9"
 dependencies = ["lxml>=4.9"]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
 keywords = ["3mf", "bambu", "prusa", "prusaslicer", "bambustudio", "orcaslicer", "3d-printing"]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -25,9 +28,16 @@ Issues = "https://github.com/CupsOhJoe/panda2prusa/issues"
 
 [project.scripts]
 panda2prusa = "panda2prusa.cli:main"
+panda2prusa-web = "panda2prusa.web:main"
 
 [project.gui-scripts]
 panda2prusa-gui = "panda2prusa.gui:main"
 
 [tool.setuptools]
 packages = ["panda2prusa"]
+
+[tool.setuptools.package-data]
+panda2prusa = ["static/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

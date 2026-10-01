@@ -28,6 +28,7 @@ from tkinter import (
 from .convert import (
     convert_file,
     describe,
+    extruder_conflicts,
     filament_label,
     suggest_extruder_map,
     used_filaments,
@@ -181,6 +182,10 @@ class App:
                 mapping = {f: int(e.get()) for f, e in entries.items()}
             except ValueError:
                 messagebox.showwarning("Bad mapping", "Extruder numbers must be integers.", parent=dlg)
+                return
+            problems = extruder_conflicts(used, mapping)
+            if problems:
+                messagebox.showwarning("Mapping conflict", "\n".join(problems), parent=dlg)
                 return
             start_with(mapping)
 

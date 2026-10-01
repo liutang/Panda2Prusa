@@ -8,12 +8,16 @@ options. Nothing is kept on disk between requests.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import json
 import os
 import re
 import shutil
 import tempfile
+import threading
 import zipfile
+from contextlib import contextmanager
 from dataclasses import asdict
 from typing import Optional
 from urllib.parse import quote
@@ -27,12 +31,31 @@ from .convert import convert_file, describe, suggest_extruder_map, used_filament
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MAX_UPLOAD_MB = int(os.environ.get("P2P_MAX_UPLOAD_MB", "300"))
+MAX_CONCURRENT = max(1, int(os.environ.get("P2P_MAX_CONCURRENT", "1")))
 _CHUNK = 1024 * 1024
+
+# Parsing a project builds large lxml trees (hundreds of MB for big meshes). Running
+# many at once multiplies the peak, and glibc keeps freed memory in per-thread arenas,
+# so the container's RSS ratchets up. Limit concurrency and hand memory back afterwards.
+_slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+_libc_name = ctypes.util.find_library("c")
+_malloc_trim = getattr(ctypes.CDLL(_libc_name), "malloc_trim", None) if _libc_name else None
 
 app = FastAPI(title="Panda2Prusa", version=__version__, docs_url="/api/docs", redoc_url=None)
 
 
 # -- helpers ------------------------------------------------------------------
+@contextmanager
+def _heavy_work():
+    """Serialize memory-heavy parsing and release freed memory to the OS afterwards."""
+    with _slots:
+        try:
+            yield
+        finally:
+            if _malloc_trim is not None:
+                _malloc_trim(0)
+
+
 def _save_upload(upload: UploadFile, workdir: str) -> str:
     """Stream an upload into ``workdir`` enforcing the size limit; return its path."""
     path = os.path.join(workdir, "input.3mf")
@@ -49,13 +72,20 @@ def _save_upload(upload: UploadFile, workdir: str) -> str:
     return path
 
 
-def _read_project(path: str):
+@contextmanager
+def _input_errors():
+    """Turn converter errors about the input or options (e.g. mapping conflicts) into 400s."""
     try:
-        return describe(path)
+        yield
     except zipfile.BadZipFile:
         raise HTTPException(400, "Not a valid .3mf file (it is not a zip archive).")
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+
+
+def _read_project(path: str):
+    with _input_errors():
+        return describe(path)
 
 
 def _slot_info(project, slot: int) -> dict:
@@ -126,8 +156,13 @@ def config() -> dict:
 @app.post("/api/inspect")
 def inspect(file: UploadFile = File(...)) -> dict:
     with tempfile.TemporaryDirectory(prefix="p2p-") as workdir:
-        project = _read_project(_save_upload(file, workdir))
+        path = _save_upload(file, workdir)
+        with _heavy_work():
+            summary = _summarize(file.filename, _read_project(path))
+    return summary
 
+
+def _summarize(filename: Optional[str], project) -> dict:
     counts: dict = {}
     for plate in project.plate_of_object.values():
         counts[plate] = counts.get(plate, 0) + 1
@@ -139,8 +174,8 @@ def inspect(file: UploadFile = File(...)) -> dict:
     )
     used = used_filaments(project)
     return {
-        "filename": file.filename,
-        "output_name": _output_name(file.filename),
+        "filename": filename,
+        "output_name": _output_name(filename),
         "producer": project.producer or None,
         "model_parts": len(project.object_trees) + 1,
         "build_items": len(project.build_items),
@@ -165,9 +200,9 @@ def convert(
     cleanup = BackgroundTask(_rmtree, workdir)
     try:
         inp = _save_upload(file, workdir)
-        _read_project(inp)  # clean 400s for unreadable input
         out = os.path.join(workdir, "output.3mf")
-        result = convert_file(inp, out, plates=plate_list, extruder_map=extruder_map)
+        with _heavy_work(), _input_errors():
+            result = convert_file(inp, out, plates=plate_list, extruder_map=extruder_map)
     except HTTPException:
         _rmtree(workdir)
         raise

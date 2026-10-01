@@ -68,10 +68,16 @@ The app is stateless: uploads are converted in a temp directory and deleted as s
 the response is sent. There's no authentication, so keep it on your LAN or put it behind a
 reverse proxy that handles auth.
 
-| Env var             | Default | Purpose                      |
-|---------------------|---------|------------------------------|
-| `P2P_PORT`          | `8543`  | Port to listen on            |
-| `P2P_MAX_UPLOAD_MB` | `300`   | Largest `.3mf` accepted (MB) |
+| Env var              | Default | Purpose                                                  |
+|----------------------|---------|----------------------------------------------------------|
+| `P2P_PORT`           | `8543`  | Port to listen on                                        |
+| `P2P_MAX_UPLOAD_MB`  | `300`   | Largest `.3mf` accepted (MB)                             |
+| `P2P_MAX_CONCURRENT` | `1`     | Conversions run at once; others wait their turn          |
+
+Memory: a conversion needs roughly 15–20x the uncompressed size of the model's mesh data
+(a 36 MB, heavily painted project peaks around 3.5 GB). `compose.yaml` mounts `/tmp` as a
+300 MB tmpfs, which also counts toward the container's memory; each request keeps the
+upload there twice plus the converted file while it's being processed.
 
 Endpoints: `GET /healthz`, `POST /api/inspect`, `POST /api/convert`; interactive API
 docs are at `/api/docs`.

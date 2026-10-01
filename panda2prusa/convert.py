@@ -8,7 +8,7 @@ from typing import Optional
 from . import ns
 from .paint import used_states, PaintError
 from .reader import read_bambu_3mf, BambuProject
-from .writer import write_prusa_3mf, WriteStats
+from .writer import extruder_conflicts, write_prusa_3mf, WriteStats
 
 
 @dataclass

@@ -114,6 +114,29 @@ def test_convert_rejects_bad_options(client, sample, form, status):
     assert r.json()["error"]
 
 
+@pytest.mark.parametrize(
+    "mapping, message",
+    [
+        ('{"1": 2, "3": 2}', "Filaments 1 and 3 are both mapped to extruder 2."),
+        # filament 3 isn't in the map, so it stays on extruder 3
+        ('{"1": 3}', "Filaments 1 and 3 are both mapped to extruder 3."),
+    ],
+)
+def test_convert_rejects_mapping_conflicts(client, sample, mapping, message):
+    r = _post(client, "/api/convert", sample, mapping_mode="custom", mapping=mapping)
+    assert r.status_code == 400
+    assert r.json()["error"] == message
+
+
+def test_extruder_conflicts_message():
+    from panda2prusa.convert import extruder_conflicts
+
+    assert extruder_conflicts([1, 2, 4], {1: 1, 2: 4, 4: 2}) == []
+    assert extruder_conflicts([1, 2, 4, 5], {1: 4, 2: 4, 4: 4, 5: 1}) == [
+        "Filaments 1, 2 and 4 are all mapped to extruder 4."
+    ]
+
+
 def test_rejects_non_zip(client):
     r = _post(client, "/api/inspect", b"not a zip")
     assert r.status_code == 400

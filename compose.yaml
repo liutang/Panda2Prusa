@@ -8,7 +8,11 @@ services:
     environment:
       # Largest .3mf accepted, in MB.
       P2P_MAX_UPLOAD_MB: "300"
+      # Conversions allowed at once; a large painted model can need a few GB each.
+      P2P_MAX_CONCURRENT: "1"
     tmpfs:
-      - /tmp
+      # RAM-backed scratch space for uploads and converted files; counts toward
+      # the container's memory.
+      - /tmp:size=300m
     read_only: true
     restart: unless-stopped

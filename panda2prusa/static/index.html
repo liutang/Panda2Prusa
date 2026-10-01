@@ -49,21 +49,45 @@
   }
   .chip input { margin: 0; accent-color: var(--accent); }
   .muted { color: var(--muted); }
-  table { width: 100%; border-collapse: collapse; }
-  td { padding: 6px 4px; border-top: 1px solid var(--border); }
-  tr:first-child td { border-top: 0; }
   .sw {
     display: inline-block; width: 20px; height: 20px; border-radius: 5px;
     border: 1px solid var(--border); vertical-align: middle;
   }
-  input[type=number] {
-    width: 64px; padding: 5px 8px; font: inherit; color: var(--text); background: var(--bg);
-    border: 1px solid var(--border); border-radius: 6px;
+  .tools { list-style: none; margin: 0; padding: 0; counter-reset: tool; }
+  .tools li {
+    counter-increment: tool; display: flex; align-items: center; gap: 10px;
+    min-height: 46px; margin-bottom: 6px; padding: 0 12px 0 0; border-radius: 8px;
   }
-  input[type=number]:disabled { opacity: .5; }
-  .modes { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 12px; }
-  .modes label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
-  .modes input { accent-color: var(--accent); }
+  .tools li::before {
+    content: "T" counter(tool); flex: 0 0 44px; align-self: stretch; display: grid; place-items: center;
+    font-weight: 600; font-size: 13px; color: var(--muted);
+    border-right: 1px solid var(--border);
+  }
+  .tools li.spacer { border: 1px dashed var(--border); color: var(--muted); font-size: 13px; }
+  .tools li.filament {
+    border: 1px solid var(--border); background: var(--card); cursor: grab;
+    touch-action: none; user-select: none; position: relative;
+  }
+  .tools li.filament:hover { border-color: var(--accent); }
+  .tools li.filament:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tools li.dragging {
+    cursor: grabbing; z-index: 1; border-color: var(--accent);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, .18);
+  }
+  .tools li.off-printer::before { color: var(--err); }
+  .grip { color: var(--muted); font-size: 18px; line-height: 1; }
+  .fil-name { font-weight: 600; }
+  .fil-meta { color: var(--muted); font-size: 13px; margin-left: 8px; }
+  .map-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  button.secondary {
+    width: auto; padding: 8px 14px; font-weight: 500; background: transparent; color: var(--text);
+    border: 1px solid var(--border);
+  }
+  button.secondary:hover { border-color: var(--accent); }
+  .hint.warn { color: var(--err); }
+  .sr-only {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+  }
   button {
     font: inherit; font-weight: 600; border: 0; border-radius: 8px; padding: 12px 20px; cursor: pointer;
     background: var(--accent); color: var(--accent-text); width: 100%;
@@ -106,12 +130,16 @@
     </div>
 
     <div class="card" id="map-card">
-      <h2>Filament → extruder mapping</h2>
-      <div class="modes">
-        <label><input type="radio" name="mode" value="custom" checked> Map to extruders</label>
-        <label><input type="radio" name="mode" value="keep"> Keep original numbers</label>
+      <h2>Filament → tool head mapping</h2>
+      <p class="hint" style="margin:0 0 12px">Drag each filament onto the tool head it should print
+        from (or focus it and use the arrow keys). Unused tool heads are spacers, so a 3-color model can
+        go on tools 1, 5 and 8.</p>
+      <ol class="tools" id="tools" aria-label="Tool heads"></ol>
+      <div class="map-actions">
+        <button type="button" class="secondary" id="map-reset">Reset</button>
       </div>
-      <table><tbody id="filaments"></tbody></table>
+      <p class="hint warn" id="map-warn" hidden></p>
+      <div class="sr-only" id="map-live" aria-live="polite"></div>
       <p class="hint">PrusaSlicer only shows multiple colors under a printer profile with multiple
         extruders/tools (MMU3, XL 2T/5T…).</p>
     </div>
@@ -196,27 +224,129 @@ function render() {
       `Plate ${pl.id}`, el("span", { className: "muted", textContent: `· ${pl.objects} obj` })));
   }
 
-  const f = $("filaments"); f.replaceChildren();
   const single = info.filaments.length < 2 && (info.filaments.length === 0 || info.filaments[0].slot === 1);
   $("map-card").hidden = single;
-  for (const fil of info.filaments) {
-    const sw = el("span", { className: "sw" });
-    if (fil.color) sw.style.background = fil.color;
-    const label = `Bambu filament ${fil.slot}` + (fil.type ? ` · ${fil.type}` : "") + (fil.color ? ` ${fil.color}` : "");
-    const num = el("input", { type: "number", min: 1, max: 32, value: info.suggested_map[fil.slot] });
-    num.dataset.slot = fil.slot;
-    f.append(el("tr", {}, el("td", { style: "width:32px" }, sw), el("td", { textContent: label }),
-      el("td", { textContent: "→ extruder", className: "muted" }), el("td", { style: "text-align:right" }, num)));
-  }
-  syncMode();
+  layoutTools(info.suggested_map);
   $("details").hidden = false;
 }
 
-function mode() { return document.querySelector("input[name=mode]:checked").value; }
-function syncMode() {
-  document.querySelectorAll("#filaments input").forEach(i => { i.disabled = mode() === "keep"; });
+// -- filament -> tool head list ------------------------------------------------
+// The list is the mapping: the Nth row is tool head N. Filaments are draggable
+// rows; empty rows are spacer tool heads. Prusa printers top out at 8 tools.
+const MAX_TOOLS = 8;
+const tools = $("tools");
+
+function filamentLabel(fil) {
+  return `Bambu filament ${fil.slot}` + (fil.type ? `, ${fil.type}` : "") + (fil.color ? ` ${fil.color}` : "");
 }
-document.querySelectorAll("input[name=mode]").forEach(r => r.addEventListener("change", syncMode));
+
+function filamentRow(fil) {
+  const sw = el("span", { className: "sw" });
+  if (fil.color) sw.style.background = fil.color;
+  const meta = [fil.type, fil.color].filter(Boolean).join(" · ");
+  const li = el("li", { className: "filament", tabIndex: 0 },
+    el("span", { className: "grip", textContent: "⠿", ariaHidden: "true" }), sw,
+    el("span", {}, el("span", { className: "fil-name", textContent: `Bambu filament ${fil.slot}` }),
+      meta ? el("span", { className: "fil-meta", textContent: meta }) : ""));
+  li.dataset.slot = fil.slot;
+  li.fil = fil;
+  return li;
+}
+
+function spacerRow() {
+  return el("li", { className: "spacer" }, el("span", { textContent: "Unused tool head" }));
+}
+
+// Lay the filaments out on tool heads from a {bambu slot: tool} map.
+function layoutTools(map) {
+  const size = Math.max(MAX_TOOLS, info.filaments.length, ...info.filaments.map(f => map[f.slot] || 0));
+  const rows = Array.from({ length: size }, spacerRow);
+  const unplaced = [];
+  for (const fil of info.filaments) {
+    const i = map[fil.slot] - 1;
+    if (rows[i] && !rows[i].fil) rows[i] = filamentRow(fil); else unplaced.push(fil);
+  }
+  for (const fil of unplaced) rows[rows.findIndex(li => !li.fil)] = filamentRow(fil);
+  tools.replaceChildren(...rows);
+  refreshTools();
+}
+
+function toolMap() {
+  const map = {};
+  [...tools.children].forEach((li, i) => { if (li.fil) map[li.fil.slot] = i + 1; });
+  return map;
+}
+
+function refreshTools() {
+  let off = 0;
+  [...tools.children].forEach((li, i) => {
+    li.classList.toggle("off-printer", i >= MAX_TOOLS);
+    if (!li.fil) return;
+    li.setAttribute("aria-label", `${filamentLabel(li.fil)}, on tool ${i + 1}. Arrow keys move it.`);
+    if (i >= MAX_TOOLS) off++;
+  });
+  const warn = $("map-warn");
+  warn.textContent = off ? `Prusa printers have at most ${MAX_TOOLS} tool heads; move filaments up from T9 and beyond.` : "";
+  warn.hidden = !off;
+}
+
+function announce(li) {
+  $("map-live").textContent = `Bambu filament ${li.fil.slot} on tool ${[...tools.children].indexOf(li) + 1}.`;
+}
+
+$("map-reset").addEventListener("click", () => layoutTools(info.suggested_map));
+
+// Pointer drag (mouse, pen and touch): the row follows the pointer and the list
+// reorders around it as it crosses the middle of another row. Move/up listen on
+// window because re-inserting the row drops its pointer capture.
+let drag = null;
+tools.addEventListener("pointerdown", ev => {
+  const li = ev.target.closest("li.filament");
+  if (!li || ev.button !== 0) return;
+  ev.preventDefault();
+  li.focus({ preventScroll: true });
+  drag = { li, id: ev.pointerId, grab: ev.clientY - li.getBoundingClientRect().top };
+  li.classList.add("dragging");
+});
+window.addEventListener("pointermove", ev => {
+  if (!drag || ev.pointerId !== drag.id) return;
+  const { li } = drag;
+  const before = [...tools.children].find(other => {
+    if (other === li) return false;
+    const r = other.getBoundingClientRect();
+    return ev.clientY < r.top + r.height / 2;
+  });
+  if ((before || null) !== li.nextElementSibling) tools.insertBefore(li, before || null);
+  li.style.transform = "";
+  const top = li.getBoundingClientRect().top;
+  li.style.transform = `translateY(${ev.clientY - drag.grab - top}px)`;
+});
+function endDrag(ev) {
+  if (!drag || ev.pointerId !== drag.id) return;
+  const { li } = drag;
+  drag = null;
+  li.classList.remove("dragging");
+  li.style.transform = "";
+  li.focus({ preventScroll: true });
+  refreshTools();
+  announce(li);
+}
+window.addEventListener("pointerup", endDrag);
+window.addEventListener("pointercancel", endDrag);
+
+tools.addEventListener("keydown", ev => {
+  const li = ev.target.closest("li.filament");
+  if (!li) return;
+  const rows = [...tools.children];
+  const to = { ArrowUp: rows.indexOf(li) - 1, ArrowDown: rows.indexOf(li) + 1, Home: 0, End: rows.length - 1 }[ev.key];
+  if (to === undefined || to < 0 || to >= rows.length) return;
+  ev.preventDefault();
+  const from = rows.indexOf(li);
+  tools.insertBefore(li, to > from ? rows[to].nextElementSibling : rows[to]);
+  li.focus();
+  refreshTools();
+  announce(li);
+});
 
 $("convert").addEventListener("click", async () => {
   const res = $("result"); res.hidden = true; res.className = "msg";
@@ -230,17 +360,9 @@ $("convert").addEventListener("click", async () => {
 
   if ($("map-card").hidden) {
     fd.append("mapping_mode", "auto");
-  } else if (mode() === "keep") {
-    fd.append("mapping_mode", "keep");
   } else {
-    const map = {};
-    for (const i of document.querySelectorAll("#filaments input")) {
-      const v = parseInt(i.value, 10);
-      if (!(v >= 1)) return show("err", `Extruder for filament ${i.dataset.slot} must be a number ≥ 1.`);
-      map[i.dataset.slot] = v;
-    }
     fd.append("mapping_mode", "custom");
-    fd.append("mapping", JSON.stringify(map));
+    fd.append("mapping", JSON.stringify(toolMap()));
   }
 
   const btn = $("convert");
@@ -257,7 +379,7 @@ $("convert").addEventListener("click", async () => {
     let text = `Done: ${stats.objects_written} objects, ${stats.volumes_written} volumes, ` +
       `${stats.build_items_written} build items, ${(stats.painted_triangles || 0).toLocaleString()} painted triangles.`;
     if (stats.extruder_map && Object.keys(stats.extruder_map).length)
-      text += " Extruders: " + Object.entries(stats.extruder_map).map(([k, v]) => `${k}→${v}`).join(", ") + ".";
+      text += " Tools: " + Object.entries(stats.extruder_map).map(([k, v]) => `${k}→${v}`).join(", ") + ".";
     res.replaceChildren(text, el("br"), "Download didn't start? ", a);
     res.classList.add("ok"); res.hidden = false;
   } catch (e) {

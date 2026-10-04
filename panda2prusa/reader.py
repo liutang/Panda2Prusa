@@ -64,6 +64,7 @@ class BambuProject:
     producer: str  # detected producer string ("BambuStudio-...", "OrcaSlicer-...", or "")
     filament_colors: list = field(default_factory=list)  # 1-based slots, "#RRGGBB" strings
     filament_types: list = field(default_factory=list)  # e.g. ["PLA", "PETG", ...]
+    source: str = "bambu"
 
     def object_element(self, path: str, objectid: str):
         """Look up an <object id=..> element in a given model file."""

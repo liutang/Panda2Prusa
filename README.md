@@ -24,6 +24,10 @@ Convert **Bambu Studio / OrcaSlicer** `.3mf` project files into **PrusaSlicer**-
   so the model prints on a 2-tool/5-tool Prusa. Paint data is re-encoded to match.
 - **Multiple plates** — pick one or convert all.
 
+It also takes **PrusaSlicer** `.3mf` projects, to move a print onto different tool heads
+without redoing the assignment in the slicer or at the printer — see
+[Remapping a PrusaSlicer project](#remapping-a-prusaslicer-project).
+
 This is a ground-up rewrite of the approach in
 [raistlinJ/3mf_bambu2prusa](https://github.com/raistlinJ/3mf_bambu2prusa), fixing its core
 limitations (hardcoded transform, ignored component structure, regex-based XML surgery).
@@ -36,6 +40,28 @@ structure entirely, and rebuilt models with fragile string substitution. Any fil
 author's sample came out mis-scaled and mis-placed, with multi-object plates collapsing on top of
 each other. This version reads the real structure with a namespace-aware XML parser and preserves it.
 
+## Remapping a PrusaSlicer project
+
+Give the converter a `.3mf` saved by PrusaSlicer 2.x and it remaps the tool heads instead
+of converting:
+
+```
+python -m panda2prusa project.3mf project_remapped.3mf --map 1=5,8=2
+```
+
+The file is copied as it is, and only what names a tool is rewritten: object, volume and
+modifier extruders, multi-material painting, per-layer-range extruders, tool changes at a
+layer, and the print profile's default extruders.
+
+The filaments follow. Moving tool 1 to tool 5 also moves tool 1's filament preset, color,
+temperatures and purge volumes to slot 5, and the filament that was in slot 5 takes slot 1,
+so the print comes out the same from different tool heads. Tool-head hardware settings
+(nozzle diameter, retraction, offsets) stay with the tool.
+
+Limits: the file still has to be sliced in PrusaSlicer afterwards (already-sliced G-code
+isn't touched), tool numbers inside custom G-code aren't rewritten, and projects saved by
+PrusaSlicer 3 aren't supported yet.
+
 ## Install
 
 ```
@@ -47,7 +73,8 @@ pip install -r requirements.txt
 ## Web app (Docker / homelab)
 
 A browser front end runs in a container on port **8543**. Drop in a `.3mf`, pick plates,
-map filaments to extruders (with color swatches), and download the converted file.
+map filaments to extruders (with color swatches), and download the converted file. A
+PrusaSlicer `.3mf` gets the same mapping list, sized to the project's own tool count.
 
 A prebuilt multi-arch image (amd64/arm64) is published to GHCR on every push to `main`:
 

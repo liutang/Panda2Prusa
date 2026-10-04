@@ -7,20 +7,24 @@ import sys
 
 from .convert import (
     convert_file,
+    default_extruder_map,
     describe,
     filament_label,
-    suggest_extruder_map,
+    filament_noun,
+    needs_mapping,
+    painted_triangles,
+    structure,
     used_filaments,
 )
-from . import ns
 
 
 def _cmd_info(args) -> int:
     project = describe(args.input)
     print(f"File:      {args.input}")
     print(f"Producer:  {project.producer or 'unknown'}")
-    print(f"Objects:   {len(project.object_trees) + 1} model part(s)")
-    print(f"Build items: {len(project.build_items)}")
+    parts, build_items = structure(project)
+    print(f"Objects:   {parts} model part(s)")
+    print(f"Build items: {build_items}")
     if project.plate_ids:
         print(f"Plates:    {', '.join(str(p) for p in project.plate_ids)}")
         # per-plate object counts
@@ -32,13 +36,7 @@ def _cmd_info(args) -> int:
     used = used_filaments(project)
     if used:
         print(f"Filaments used: {', '.join(filament_label(project, f) for f in used)}")
-    # painting summary
-    painted = 0
-    for tree in [project.root_tree, *project.object_trees.values()]:
-        for tri in tree.getroot().iter(ns.q(ns.CORE, "triangle")):
-            if "paint_color" in tri.attrib:
-                painted += 1
-    print(f"Painted triangles: {painted}")
+    print(f"Painted triangles: {painted_triangles(project)}")
     return 0
 
 
@@ -60,12 +58,12 @@ def _parse_map(text: str) -> dict:
 def _prompt_extruder_map(project) -> dict | None:
     """Show the file's filaments and ask how to map them. None = auto-compact."""
     used = used_filaments(project)
-    if len(used) < 2 and used == [1]:
+    if not needs_mapping(project):
         return None  # single color on slot 1 — nothing to decide
     print(f"This file uses {len(used)} filament(s):")
     for f in used:
-        print(f"  filament {filament_label(project, f)}")
-    suggestion = suggest_extruder_map(used)
+        print(f"  {filament_noun(project)} {filament_label(project, f)}")
+    suggestion = default_extruder_map(project)
     sug = ", ".join(f"{k}->{v}" for k, v in suggestion.items())
     try:
         resp = input(
@@ -122,10 +120,13 @@ def _cmd_convert(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="panda2prusa",
-        description="Convert Bambu Studio / OrcaSlicer .3mf files to PrusaSlicer .3mf.",
+        description=(
+            "Convert Bambu Studio / OrcaSlicer .3mf files to PrusaSlicer .3mf, "
+            "or remap the tools of a PrusaSlicer .3mf."
+        ),
     )
     p.add_argument("--info", metavar="FILE", help="inspect a 3mf and exit")
-    p.add_argument("input", nargs="?", help="input Bambu/Orca .3mf")
+    p.add_argument("input", nargs="?", help="input Bambu/Orca (or PrusaSlicer) .3mf")
     p.add_argument("output", nargs="?", help="output Prusa .3mf")
     p.add_argument(
         "--plate",
@@ -135,7 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--map",
         metavar="MAP",
-        help="map Bambu filament slots to Prusa extruders, e.g. --map 3=2 or --map 1=2,3=1",
+        help=(
+            "map filament slots to Prusa extruders, e.g. --map 3=2 or --map 1=2,3=1 "
+            "(for a PrusaSlicer input the filament settings move with them)"
+        ),
     )
     p.add_argument(
         "--keep-extruders",

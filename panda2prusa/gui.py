@@ -27,10 +27,13 @@ from tkinter import (
 
 from .convert import (
     convert_file,
+    default_extruder_map,
     describe,
     extruder_conflicts,
     filament_label,
-    suggest_extruder_map,
+    filament_noun,
+    needs_mapping,
+    output_suffix,
     used_filaments,
 )
 
@@ -93,10 +96,10 @@ class App:
             return
         self.input_var.set(path)
         base, _ = os.path.splitext(path)
-        if not self.output_var.get():
-            self.output_var.set(base + "_prusa.3mf")
+        suffix = output_suffix("bambu")
         try:
             project = describe(path)
+            suffix = output_suffix(project.source)
             plates = project.plate_ids or ["(single)"]
             self._log(f"Loaded: {os.path.basename(path)}")
             self._log(f"  producer: {project.producer or 'unknown'}")
@@ -106,6 +109,8 @@ class App:
                 self._log(f"  filaments: {', '.join(filament_label(project, f) for f in used)}")
         except Exception as exc:
             self._log(f"  could not inspect: {exc}")
+        if not self.output_var.get():
+            self.output_var.set(base + suffix + ".3mf")
 
     def pick_output(self) -> None:
         path = filedialog.asksaveasfilename(defaultextension=".3mf", filetypes=[("3mf files", "*.3mf")])
@@ -131,7 +136,7 @@ class App:
             messagebox.showerror("Cannot read file", str(exc))
             return
         used = used_filaments(project)
-        if len(used) > 1 or used not in ([], [1]):
+        if needs_mapping(project):
             self._ask_mapping(project, used, inp, outp, plates)
         else:
             self._start(inp, outp, plates, None)
@@ -151,7 +156,7 @@ class App:
             justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(10, 6))
 
-        suggestion = suggest_extruder_map(used)
+        suggestion = default_extruder_map(project)
         entries: dict[int, Entry] = {}
         for i, f in enumerate(used, start=1):
             row = Frame(dlg)
@@ -167,7 +172,7 @@ class App:
                 except Exception:
                     pass
             sw.pack(side="left", padx=(0, 6))
-            Label(row, text=f"Bambu filament {filament_label(project, f)}  →  extruder").pack(side="left")
+            Label(row, text=f"{filament_noun(project)} {filament_label(project, f)}  →  extruder").pack(side="left")
             e = Entry(row, width=4)
             e.insert(0, str(suggestion[f]))
             e.pack(side="left", padx=(6, 0))

@@ -140,3 +140,43 @@ def test_extruder_conflicts_message():
 def test_rejects_non_zip(client):
     r = _post(client, "/api/inspect", b"not a zip")
     assert r.status_code == 400
+
+
+# -- PrusaSlicer input --------------------------------------------------------
+@pytest.fixture(scope="module")
+def prusa_sample(tmp_path_factory):
+    import test_prusa
+
+    path = tmp_path_factory.mktemp("web") / "prusa.3mf"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("3D/3dmodel.model", test_prusa.MODEL)
+        z.writestr("Metadata/Slic3r_PE_model.config", test_prusa.MODEL_CONFIG)
+        z.writestr("Metadata/Slic3r_PE.config", test_prusa.PRINT_CONFIG)
+    return path.read_bytes()
+
+
+def test_inspect_prusa(client, prusa_sample):
+    info = _post(client, "/api/inspect", prusa_sample).json()
+    assert info["source"] == "prusa"
+    assert info["output_name"] == "sample_remapped.3mf"
+    assert info["tools"] == 4
+    assert info["plates"] == []
+    assert [f["slot"] for f in info["filaments"]] == [1, 2, 3, 4]
+    assert info["filaments"][1] == {"slot": 2, "color": "#BBBBBB", "type": "PETG"}
+    assert info["suggested_map"] == {"1": 1, "2": 2, "3": 3, "4": 4}
+    assert info["painted_triangles"] == 2
+
+
+def test_remap_prusa(client, prusa_sample):
+    mapping = '{"1": 2, "2": 1, "3": 3, "4": 4}'
+    r = _post(client, "/api/convert", prusa_sample, mapping_mode="custom", mapping=mapping)
+    assert r.status_code == 200
+    assert "sample_remapped.3mf" in r.headers["content-disposition"]
+    stats = json.loads(r.headers["x-panda2prusa-stats"])
+    assert stats["extruder_map"] == {"1": 2, "2": 1}
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        assert "; filament_type = PETG;PLA;PLA;ASA" in z.read("Metadata/Slic3r_PE.config").decode()
+
+    r = _post(client, "/api/convert", prusa_sample, mapping_mode="custom", mapping='{"1": 9}')
+    assert r.status_code == 400
+    assert "4 tool(s)" in r.json()["error"]

@@ -107,7 +107,8 @@
 <main>
   <header>
     <h1>🐼 Panda2Prusa</h1>
-    <p>Convert Bambu Studio / OrcaSlicer <code>.3mf</code> projects to PrusaSlicer.</p>
+    <p>Convert Bambu Studio / OrcaSlicer <code>.3mf</code> projects to PrusaSlicer, or remap the
+      tool heads of a PrusaSlicer <code>.3mf</code>.</p>
   </header>
 
   <label id="drop" class="card" for="file">
@@ -134,6 +135,9 @@
       <p class="hint" style="margin:0 0 12px">Drag each filament onto the tool head it should print
         from (or focus it and use the arrow keys). Unused tool heads are spacers, so a 3-color model can
         go on tools 1, 5 and 8.</p>
+      <p class="hint" id="map-prusa" style="margin:0 0 12px" hidden>This is a PrusaSlicer project, so
+        each filament's preset, color and temperatures move to its new tool head; a filament already
+        on that tool head takes the vacated one.</p>
       <ol class="tools" id="tools" aria-label="Tool heads"></ol>
       <div class="map-actions">
         <button type="button" class="secondary" id="map-reset">Reset</button>
@@ -224,20 +228,34 @@ function render() {
       `Plate ${pl.id}`, el("span", { className: "muted", textContent: `· ${pl.objects} obj` })));
   }
 
-  const single = info.filaments.length < 2 && (info.filaments.length === 0 || info.filaments[0].slot === 1);
+  const prusa = info.source === "prusa";
+  const single = info.filaments.length < 2 && (info.filaments.length === 0 || (!prusa && info.filaments[0].slot === 1));
   $("map-card").hidden = single;
+  $("map-prusa").hidden = !prusa;
+  maxTools = info.tools || MAX_TOOLS;
+  $("convert").textContent = actionLabel();
   layoutTools(info.suggested_map);
   $("details").hidden = false;
 }
 
 // -- filament -> tool head list ------------------------------------------------
 // The list is the mapping: the Nth row is tool head N. Filaments are draggable
-// rows; empty rows are spacer tool heads. Prusa printers top out at 8 tools.
+// rows; empty rows are spacer tool heads. Prusa printers top out at 8 tools; a
+// Prusa project brings its own tool count from its printer profile.
 const MAX_TOOLS = 8;
+let maxTools = MAX_TOOLS;
 const tools = $("tools");
 
+function actionLabel() {
+  return info && info.source === "prusa" ? "Remap & download" : "Convert & download";
+}
+
+function filamentName(fil) {
+  return info.source === "prusa" ? `Tool ${fil.slot} filament` : `Bambu filament ${fil.slot}`;
+}
+
 function filamentLabel(fil) {
-  return `Bambu filament ${fil.slot}` + (fil.type ? `, ${fil.type}` : "") + (fil.color ? ` ${fil.color}` : "");
+  return filamentName(fil) + (fil.type ? `, ${fil.type}` : "") + (fil.color ? ` ${fil.color}` : "");
 }
 
 function filamentRow(fil) {
@@ -246,7 +264,7 @@ function filamentRow(fil) {
   const meta = [fil.type, fil.color].filter(Boolean).join(" · ");
   const li = el("li", { className: "filament", tabIndex: 0 },
     el("span", { className: "grip", textContent: "⠿", ariaHidden: "true" }), sw,
-    el("span", {}, el("span", { className: "fil-name", textContent: `Bambu filament ${fil.slot}` }),
+    el("span", {}, el("span", { className: "fil-name", textContent: filamentName(fil) }),
       meta ? el("span", { className: "fil-meta", textContent: meta }) : ""));
   li.dataset.slot = fil.slot;
   li.fil = fil;
@@ -259,7 +277,7 @@ function spacerRow() {
 
 // Lay the filaments out on tool heads from a {bambu slot: tool} map.
 function layoutTools(map) {
-  const size = Math.max(MAX_TOOLS, info.filaments.length, ...info.filaments.map(f => map[f.slot] || 0));
+  const size = Math.max(maxTools, info.filaments.length, ...info.filaments.map(f => map[f.slot] || 0));
   const rows = Array.from({ length: size }, spacerRow);
   const unplaced = [];
   for (const fil of info.filaments) {
@@ -280,18 +298,19 @@ function toolMap() {
 function refreshTools() {
   let off = 0;
   [...tools.children].forEach((li, i) => {
-    li.classList.toggle("off-printer", i >= MAX_TOOLS);
+    li.classList.toggle("off-printer", i >= maxTools);
     if (!li.fil) return;
     li.setAttribute("aria-label", `${filamentLabel(li.fil)}, on tool ${i + 1}. Arrow keys move it.`);
-    if (i >= MAX_TOOLS) off++;
+    if (i >= maxTools) off++;
   });
   const warn = $("map-warn");
-  warn.textContent = off ? `Prusa printers have at most ${MAX_TOOLS} tool heads; move filaments up from T9 and beyond.` : "";
+  const limit = info.tools ? `This project's printer has ${maxTools} tool heads` : `Prusa printers have at most ${maxTools} tool heads`;
+  warn.textContent = off ? `${limit}; move filaments up from T${maxTools + 1} and beyond.` : "";
   warn.hidden = !off;
 }
 
 function announce(li) {
-  $("map-live").textContent = `Bambu filament ${li.fil.slot} on tool ${[...tools.children].indexOf(li) + 1}.`;
+  $("map-live").textContent = `${filamentName(li.fil)} on tool ${[...tools.children].indexOf(li) + 1}.`;
 }
 
 $("map-reset").addEventListener("click", () => layoutTools(info.suggested_map));
@@ -385,7 +404,7 @@ $("convert").addEventListener("click", async () => {
   } catch (e) {
     show("err", e.message);
   } finally {
-    btn.disabled = false; btn.textContent = "Convert & download";
+    btn.disabled = false; btn.textContent = actionLabel();
   }
 
   function show(kind, text) { res.textContent = text; res.classList.add(kind); res.hidden = false; }

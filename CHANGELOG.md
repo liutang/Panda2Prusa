@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- PrusaSlicer 2.x `.3mf` projects are accepted as input. They are copied as they are
+  with their tool heads remapped: object/volume extruders, multi-material painting,
+  layer-range extruders and tool changes move, and each filament's preset, color,
+  temperatures and purge volumes follow it to the new tool. The CLI, GUI and web app
+  detect the format on their own; output is named `*_remapped.3mf`.
+
 ## v1.0.0 — 2026-07-11
 
 First public release.

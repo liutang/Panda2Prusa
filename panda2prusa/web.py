@@ -1,7 +1,8 @@
 """Web interface: python -m panda2prusa.web
 
 A small, stateless FastAPI app for running the converter from a browser (e.g. in a
-homelab container). The browser keeps the uploaded file and sends it twice: once to
+homelab container). It takes Bambu/Orca projects to convert and PrusaSlicer projects
+to remap. The browser keeps the uploaded file and sends it twice: once to
 ``/api/inspect`` to learn its plates/filaments, then to ``/api/convert`` with the chosen
 options. Nothing is kept on disk between requests.
 """
@@ -26,8 +27,16 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 
-from . import __version__, ns
-from .convert import convert_file, describe, suggest_extruder_map, used_filaments
+from . import __version__
+from .convert import (
+    convert_file,
+    default_extruder_map,
+    describe,
+    output_suffix,
+    painted_triangles,
+    structure,
+    used_filaments,
+)
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MAX_UPLOAD_MB = int(os.environ.get("P2P_MAX_UPLOAD_MB", "300"))
@@ -127,9 +136,9 @@ def _parse_mapping(mode: str, mapping: str) -> Optional[dict]:
     return result
 
 
-def _output_name(filename: Optional[str]) -> str:
+def _output_name(filename: Optional[str], source: str = "bambu") -> str:
     base = os.path.splitext(os.path.basename(filename or "model.3mf"))[0] or "model"
-    return f"{base}_prusa.3mf"
+    return f"{base}{output_suffix(source)}.3mf"
 
 
 def _content_disposition(name: str) -> str:
@@ -166,23 +175,20 @@ def _summarize(filename: Optional[str], project) -> dict:
     counts: dict = {}
     for plate in project.plate_of_object.values():
         counts[plate] = counts.get(plate, 0) + 1
-    painted = sum(
-        1
-        for tree in [project.root_tree, *project.object_trees.values()]
-        for tri in tree.getroot().iter(ns.q(ns.CORE, "triangle"))
-        if "paint_color" in tri.attrib
-    )
-    used = used_filaments(project)
+    parts, build_items = structure(project)
     return {
         "filename": filename,
-        "output_name": _output_name(filename),
+        "output_name": _output_name(filename, project.source),
+        "source": project.source,
         "producer": project.producer or None,
-        "model_parts": len(project.object_trees) + 1,
-        "build_items": len(project.build_items),
+        "model_parts": parts,
+        "build_items": build_items,
         "plates": [{"id": p, "objects": counts.get(p, 0)} for p in project.plate_ids],
-        "filaments": [_slot_info(project, f) for f in used],
-        "suggested_map": {str(k): v for k, v in suggest_extruder_map(used).items()},
-        "painted_triangles": painted,
+        "filaments": [_slot_info(project, f) for f in used_filaments(project)],
+        "suggested_map": {str(k): v for k, v in default_extruder_map(project).items()},
+        # Tool heads in a Prusa project's printer profile; unknown for Bambu input.
+        "tools": getattr(project, "extruder_count", None),
+        "painted_triangles": painted_triangles(project),
     }
 
 
@@ -217,7 +223,7 @@ def convert(
         _rmtree(workdir)
         raise HTTPException(422, "No objects were written — check the plate selection.")
 
-    name = _output_name(file.filename)
+    name = _output_name(file.filename, result.source)
     return FileResponse(
         out,
         media_type="application/vnd.ms-package.3dmanufacturing-3dmodel+xml",

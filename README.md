@@ -19,6 +19,12 @@ Convert **Bambu Studio / OrcaSlicer** `.3mf` project files into **PrusaSlicer**-
   TriangleSelector bitstream is preserved (and transcoded when extruders are renumbered).
 - **Multi-material part / extruder assignments** from `Metadata/model_settings.config` →
   PrusaSlicer merged-mesh volume config (`firstid`/`lastid` ranges).
+- **Part types** — modifiers, negative parts, support blockers and support enforcers stay
+  what they are instead of becoming printed parts.
+- **Object and modifier settings** — walls, infill, shells, speeds, supports, brim, ironing,
+  seam and the other settings changed for an object or a part are translated to their
+  PrusaSlicer names and values. A setting PrusaSlicer has no equivalent for (brim ears, for
+  example) is listed in a warning after the conversion instead of being dropped silently.
 - **Filament → extruder mapping** — Bambu AMS slots are sparse (a two-color print may use
   slots 1 and 3); the converter asks how to map them (or auto-compacts to extruders 1..K)
   so the model prints on a 2-tool/5-tool Prusa. Paint data is re-encoded to match.

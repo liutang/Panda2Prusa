@@ -111,6 +111,8 @@ def _cmd_convert(args) -> int:
     if s.extruder_map:
         remapped = ", ".join(f"{k}->{v}" for k, v in sorted(s.extruder_map.items()))
         print(f"Extruders remapped:   {remapped}")
+    for line in s.warnings:
+        print(f"WARNING: {line}", file=sys.stderr)
     if s.objects_written == 0:
         print("WARNING: no objects were written — check plate selection.", file=sys.stderr)
         return 2

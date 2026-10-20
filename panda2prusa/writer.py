@@ -26,6 +26,7 @@ import lxml.etree as ET
 from . import ns
 from .paint import transform_states, used_states, PaintError
 from .reader import BambuProject, Part, ROOT_MODEL
+from .settings import FILAMENTS, Warnings, translate
 from .transform import Transform
 
 # Attributes to strip from triangles (production + bambu extensions).
@@ -54,6 +55,7 @@ class WriteStats:
     painted_triangles: int = 0
     plates_included: Optional[list] = None
     extruder_map: Optional[dict] = None  # {bambu filament -> prusa extruder} if remapped
+    warnings: list = field(default_factory=list)  # what could not be converted, one line each
 
 
 @dataclass
@@ -63,6 +65,8 @@ class _Volume:
     leaf_oid: str
     name: str = ""
     extruder: Optional[str] = None
+    volume_type: str = "ModelPart"  # PrusaSlicer's name, see _VOLUME_TYPES
+    settings: dict = field(default_factory=dict)  # the Bambu part's metadata, settings included
 
 
 @dataclass
@@ -136,6 +140,25 @@ def _fmt(v: float) -> str:
     return repr(v)
 
 
+# Bambu Studio / OrcaSlicer part subtypes -> PrusaSlicer volume types.
+_VOLUME_TYPES = {
+    "normal_part": "ModelPart",
+    "modifier_part": "ParameterModifier",
+    "negative_part": "NegativeVolume",
+    "support_enforcer": "SupportEnforcer",
+    "support_blocker": "SupportBlocker",
+}
+
+
+def _volume_type(subtype: str) -> str:
+    """PrusaSlicer volume type for a Bambu/Orca part subtype.
+
+    Subtypes PrusaSlicer has no counterpart for (OrcaSlicer's precise seam volumes)
+    become modifiers without settings: kept, but neither printed nor changing the print.
+    """
+    return _VOLUME_TYPES.get(subtype, "ParameterModifier")
+
+
 def _plan_object(root_key, objs, src_path, parts: list) -> Optional[_MergedObject]:
     """Plan merging a build object's component tree into a single mesh.
 
@@ -180,6 +203,8 @@ def _plan_object(root_key, objs, src_path, parts: list) -> Optional[_MergedObjec
                     leaf_oid=leaf_key[1],
                     name=(part.name if part else "") or leaf.get("name", ""),
                     extruder=part.extruder if part else None,
+                    volume_type=_volume_type(part.subtype) if part else "ModelPart",
+                    settings=part.settings if part else {},
                 )
             )
     return merged
@@ -328,15 +353,17 @@ def _used_filaments(project: BambuProject, merged: dict) -> set[int]:
     paint_strings: set[str] = set()
     for key, mo in merged.items():
         so = project.settings_objects.get(key[1])
-        if so and so.extruder:
-            try:
-                used.add(int(so.extruder))
-            except ValueError:
-                pass
-        for vol in mo.volumes:
-            if vol.extruder:
+        # Only parts and modifiers print with a filament.
+        printing = [vol for vol in mo.volumes if vol.volume_type in ("ModelPart", "ParameterModifier")]
+        extruders = [so.extruder] if so else []
+        extruders += [vol.extruder for vol in printing]
+        # Filaments of the supports, set for the object or a part.
+        for cfg in ([so.settings] if so else []) + [vol.settings for vol in printing]:
+            extruders += [cfg.get(k) for k in FILAMENTS]
+        for ext in extruders:
+            if ext:
                 try:
-                    used.add(int(vol.extruder))
+                    used.add(int(ext))
                 except ValueError:
                     pass
         paint_strings |= mo.paint_codes
@@ -478,7 +505,12 @@ def write_prusa_3mf(
     ).decode("utf-8")
     head, mark, tail = skeleton.partition(f"    <!--{_RESOURCES_MARK}-->\n")
 
-    model_config = _build_model_config(project, merged, id_map, extruder_map)
+    warnings = Warnings()
+    model_config = _build_model_config(project, merged, id_map, extruder_map, warnings)
+    if project.has_layer_height_profiles:
+        warnings.add("Variable layer height is not converted")
+    if project.has_layer_ranges:
+        warnings.add("Height range modifiers are not converted")
 
     # Assemble the package.
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -507,6 +539,7 @@ def write_prusa_3mf(
         painted_triangles=sum(mo.painted for mo in merged.values()),
         plates_included=plates,
         extruder_map=extruder_map,
+        warnings=warnings.lines(),
     )
 
 
@@ -536,13 +569,24 @@ def _cfg_meta(parent, mtype: str, mkey: str, value: str) -> None:
 
 
 def _build_model_config(
-    project: BambuProject, merged: dict, id_map: dict, extruder_map: Optional[dict] = None
+    project: BambuProject,
+    merged: dict,
+    id_map: dict,
+    extruder_map: Optional[dict] = None,
+    warnings: Optional[Warnings] = None,
 ) -> Optional[bytes]:
-    """Emit PrusaSlicer object/volume config: names + per-volume extruders.
+    """Emit PrusaSlicer object/volume config: names, types, extruders and settings.
 
     Volumes are identified by firstid/lastid triangle ranges over the merged mesh,
     matching PrusaSlicer's native writer, so extruder assignments survive import.
+    Settings PrusaSlicer has no equivalent for are left out and added to ``warnings``.
     """
+    if warnings is None:
+        warnings = Warnings()
+
+    def remap(f: int) -> int:
+        return extruder_map.get(f, f) if extruder_map else f
+
     root = ET.Element("config")
     for key, mo in merged.items():
         old_id = key[1]
@@ -560,14 +604,22 @@ def _build_model_config(
                 except ValueError:
                     pass
             _cfg_meta(obj_el, "object", "extruder", ext)
+        if so:
+            for k, v in translate(so.settings, name, warnings, True, project.nozzle_diameter, remap).items():
+                _cfg_meta(obj_el, "object", k, v)
         for vol in mo.volumes:
             vol_el = ET.SubElement(obj_el, "volume")
             vol_el.set("firstid", str(vol.firstid))
             vol_el.set("lastid", str(vol.lastid))
             _cfg_meta(vol_el, "volume", "name", vol.name or name or f"part {vol.leaf_oid}")
-            _cfg_meta(vol_el, "volume", "volume_type", "model_part")
+            _cfg_meta(vol_el, "volume", "volume_type", vol.volume_type)
             if vol.extruder:
                 _cfg_meta(vol_el, "volume", "extruder", vol.extruder)
+            # Negative volumes and support blockers or enforcers have no print settings.
+            if vol.volume_type in ("ModelPart", "ParameterModifier"):
+                part_settings = translate(vol.settings, name, warnings, False, project.nozzle_diameter, remap)
+                for k, v in part_settings.items():
+                    _cfg_meta(vol_el, "volume", k, v)
     if len(root) == 0:
         return None
     return ET.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)

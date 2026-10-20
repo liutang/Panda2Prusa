@@ -31,6 +31,8 @@ class Part:
     name: str = ""
     extruder: Optional[str] = None
     matrix: Optional[str] = None
+    subtype: str = "normal_part"  # normal_part, modifier_part, negative_part, support_enforcer, ...
+    settings: dict = field(default_factory=dict)  # every metadata key -> value, settings included
 
 
 @dataclass
@@ -41,6 +43,7 @@ class SettingsObject:
     name: str = ""
     extruder: Optional[str] = None
     parts: list[Part] = field(default_factory=list)
+    settings: dict = field(default_factory=dict)  # every metadata key -> value, settings included
 
 
 @dataclass
@@ -64,6 +67,9 @@ class BambuProject:
     producer: str  # detected producer string ("BambuStudio-...", "OrcaSlicer-...", or "")
     filament_colors: list = field(default_factory=list)  # 1-based slots, "#RRGGBB" strings
     filament_types: list = field(default_factory=list)  # e.g. ["PLA", "PETG", ...]
+    nozzle_diameter: Optional[float] = None  # of the first nozzle, for line widths in %
+    has_layer_height_profiles: bool = False  # variable layer height, not converted
+    has_layer_ranges: bool = False  # height range modifiers, not converted
     source: str = "bambu"
 
     def object_element(self, path: str, objectid: str):
@@ -157,12 +163,16 @@ def read_bambu_3mf(path: str) -> BambuProject:
         # Filament slot colors/types from Bambu's project settings (JSON).
         filament_colors: list[str] = []
         filament_types: list[str] = []
+        nozzle_diameter: Optional[float] = None
         ps_name = "Metadata/project_settings.config"
         if ps_name in names:
             try:
                 ps = json.loads(z.read(ps_name))
                 filament_colors = [str(c) for c in ps.get("filament_colour") or []]
                 filament_types = [str(t) for t in ps.get("filament_type") or []]
+                nozzles = ps.get("nozzle_diameter") or []
+                if nozzles:
+                    nozzle_diameter = float(nozzles[0])
             except (ValueError, TypeError):
                 pass
 
@@ -185,6 +195,9 @@ def read_bambu_3mf(path: str) -> BambuProject:
         producer=producer,
         filament_colors=filament_colors,
         filament_types=filament_types,
+        nozzle_diameter=nozzle_diameter,
+        has_layer_height_profiles="Metadata/layer_heights_profile.txt" in names,
+        has_layer_ranges="Metadata/layer_config_ranges.xml" in names,
     )
 
 
@@ -199,14 +212,20 @@ def _parse_model_settings(data: bytes):
         so = SettingsObject(id=oid)
         for md in obj.findall("metadata"):
             key, val = md.get("key"), md.get("value")
+            if key is None or val is None:
+                continue
+            so.settings[key] = val
             if key == "name":
                 so.name = val or ""
             elif key == "extruder":
                 so.extruder = val
         for part in obj.findall("part"):
-            p = Part(id=part.get("id", ""))
+            p = Part(id=part.get("id", ""), subtype=part.get("subtype") or "normal_part")
             for md in part.findall("metadata"):
                 key, val = md.get("key"), md.get("value")
+                if key is None or val is None:
+                    continue
+                p.settings[key] = val
                 if key == "name":
                     p.name = val or ""
                 elif key == "extruder":

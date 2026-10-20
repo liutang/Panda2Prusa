@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Modifiers, negative parts, support blockers and support enforcers keep their type.
+  Before, every part was written as a printed part, so a support blocker printed as a
+  solid block.
+- The settings of objects and parts (modifiers included) are converted: the Bambu keys and
+  values are translated to PrusaSlicer's where both mean the same, e.g. `wall_loops` →
+  `perimeters`, `sparse_infill_pattern` `zig-zag` → `fill_pattern` `rectilinear`, line
+  widths in % of the nozzle → mm. Tree support styles become Organic, the Contour fuzzy
+  skin becomes External. Brim ears and painted brims become no brim, an automatic brim is
+  left to the print preset.
+- Settings that can't be converted, variable layer height and height range modifiers
+  are listed as warnings after the conversion, in the CLI, the GUI and the web app.
 - PrusaSlicer 2.x `.3mf` projects are accepted as input. They are copied as they are
   with their tool heads remapped: object/volume extruders, multi-material painting,
   layer-range extruders and tool changes move, and each filament's preset, color,

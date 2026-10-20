@@ -68,8 +68,11 @@ class BambuProject:
     filament_colors: list = field(default_factory=list)  # 1-based slots, "#RRGGBB" strings
     filament_types: list = field(default_factory=list)  # e.g. ["PLA", "PETG", ...]
     nozzle_diameter: Optional[float] = None  # of the first nozzle, for line widths in %
-    has_layer_height_profiles: bool = False  # variable layer height, not converted
-    has_layer_ranges: bool = False  # height range modifiers, not converted
+    first_layer_height: Optional[float] = None  # initial_layer_print_height of the project
+    # Variable layer height: root object id -> [z0, h0, z1, h1, ...] from the object's bottom.
+    layer_height_profiles: dict = field(default_factory=dict)
+    # Height range modifiers: root object id -> [(min_z, max_z, {setting: value})].
+    layer_ranges: dict = field(default_factory=dict)
     source: str = "bambu"
 
     def object_element(self, path: str, objectid: str):
@@ -164,6 +167,7 @@ def read_bambu_3mf(path: str) -> BambuProject:
         filament_colors: list[str] = []
         filament_types: list[str] = []
         nozzle_diameter: Optional[float] = None
+        first_layer_height: Optional[float] = None
         ps_name = "Metadata/project_settings.config"
         if ps_name in names:
             try:
@@ -173,8 +177,24 @@ def read_bambu_3mf(path: str) -> BambuProject:
                 nozzles = ps.get("nozzle_diameter") or []
                 if nozzles:
                     nozzle_diameter = float(nozzles[0])
+                if ps.get("initial_layer_print_height"):
+                    first_layer_height = float(ps["initial_layer_print_height"])
             except (ValueError, TypeError):
                 pass
+
+        # Variable layer height and height ranges are stored per object, numbered in the
+        # order the root objects are saved in (1-based), as PrusaSlicer numbers them too.
+        root_objects = [
+            obj.get("id") for obj in root_tree.getroot().iter(ns.q(ns.CORE, "object")) if obj.get("id")
+        ]
+        layer_height_profiles: dict = {}
+        if "Metadata/layer_heights_profile.txt" in names:
+            layer_height_profiles = _parse_layer_height_profiles(
+                z.read("Metadata/layer_heights_profile.txt"), root_objects
+            )
+        layer_ranges: dict = {}
+        if "Metadata/layer_config_ranges.xml" in names:
+            layer_ranges = _parse_layer_ranges(z.read("Metadata/layer_config_ranges.xml"), root_objects)
 
         # Passthrough assets we want to keep (thumbnails); skip Bambu-only config.
         raw_entries: dict[str, bytes] = {}
@@ -196,9 +216,55 @@ def read_bambu_3mf(path: str) -> BambuProject:
         filament_colors=filament_colors,
         filament_types=filament_types,
         nozzle_diameter=nozzle_diameter,
-        has_layer_height_profiles="Metadata/layer_heights_profile.txt" in names,
-        has_layer_ranges="Metadata/layer_config_ranges.xml" in names,
+        first_layer_height=first_layer_height,
+        layer_height_profiles=layer_height_profiles,
+        layer_ranges=layer_ranges,
     )
+
+
+def _object_for_index(index: str, root_objects: list) -> Optional[str]:
+    """Root object id for a 1-based object number of the layer height files."""
+    try:
+        i = int(index)
+    except (TypeError, ValueError):
+        return None
+    return root_objects[i - 1] if 0 < i <= len(root_objects) else None
+
+
+def _parse_layer_height_profiles(data: bytes, root_objects: list) -> dict:
+    """``object_id=N|z;h;z;h;...`` lines -> {root object id: [z, h, z, h, ...]}."""
+    profiles = {}
+    for line in data.decode("utf-8", "replace").splitlines():
+        head, sep, values = line.strip().partition("|")
+        if not sep or not head.startswith("object_id="):
+            continue
+        oid = _object_for_index(head[len("object_id="):], root_objects)
+        try:
+            profile = [float(v) for v in values.split(";")]
+        except ValueError:
+            continue
+        # PrusaSlicer's own sanity check: at least three (z, height) pairs.
+        if oid and len(profile) > 4 and len(profile) % 2 == 0:
+            profiles[oid] = profile
+    return profiles
+
+
+def _parse_layer_ranges(data: bytes, root_objects: list) -> dict:
+    """layer_config_ranges.xml -> {root object id: [(min_z, max_z, {setting: value})]}."""
+    root = ET.fromstring(data, parser=ET.XMLParser(recover=True))
+    ranges = {}
+    for obj in root.findall("object"):
+        oid = _object_for_index(obj.get("id"), root_objects)
+        if oid is None:
+            continue
+        for rng in obj.findall("range"):
+            try:
+                min_z, max_z = float(rng.get("min_z")), float(rng.get("max_z"))
+            except (TypeError, ValueError):
+                continue
+            options = {o.get("opt_key"): (o.text or "") for o in rng.findall("option") if o.get("opt_key")}
+            ranges.setdefault(oid, []).append((min_z, max_z, options))
+    return ranges
 
 
 def _parse_model_settings(data: bytes):

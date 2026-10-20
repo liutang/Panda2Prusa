@@ -67,6 +67,7 @@ class _Volume:
     extruder: Optional[str] = None
     volume_type: str = "ModelPart"  # PrusaSlicer's name, see _VOLUME_TYPES
     settings: dict = field(default_factory=dict)  # the Bambu part's metadata, settings included
+    leaf_idx: int = -1  # index into _MergedObject.leaves
 
 
 @dataclass
@@ -205,6 +206,7 @@ def _plan_object(root_key, objs, src_path, parts: list) -> Optional[_MergedObjec
                     extruder=part.extruder if part else None,
                     volume_type=_volume_type(part.subtype) if part else "ModelPart",
                     settings=part.settings if part else {},
+                    leaf_idx=leaf_idx,
                 )
             )
     return merged
@@ -289,33 +291,46 @@ def _extra_triangle_attrs(t, recode) -> tuple[str, str]:
     return "".join(decls), "".join(parts)
 
 
-def _write_object(w, mo: _MergedObject, oid: str, objs, recode) -> None:
-    """Stream one merged <object>: all leaves' vertices, then all their triangles."""
+def _write_object(w, mo: _MergedObject, oid: str, objs, recode, placement=None) -> Optional[float]:
+    """Stream one merged <object>: all leaves' vertices, then all their triangles.
+
+    Returns the height of the object's printed parts as placed by ``placement`` (the
+    Transform of its first build item), which is what a layer height profile spans.
+    """
     name = f' name="{_esc(mo.name)}"' if mo.name else ""
     w(f'    <object type="model"{name} id="{oid}">\n      <mesh>\n')
+
+    # Only printed parts count for the height, not modifiers, negative volumes or blockers.
+    printed = {vol.leaf_idx for vol in mo.volumes if vol.volume_type == "ModelPart"}
+    pm = placement.m if placement is not None else None
+    z_min, z_max = float("inf"), float("-inf")
 
     vbases = []
     vbase = 0
     opened = False
-    for leaf_key, xf in mo.leaves:
+    for leaf_idx, (leaf_key, xf) in enumerate(mo.leaves):
         vbases.append(vbase)
         verts = objs[leaf_key].find(_MESH).find(_VERTICES)
         if verts is None:
             continue
         identity = xf.is_identity(tol=1e-9)
+        measure = pm is not None and leaf_idx in printed
         for v in verts.iterchildren(_VERTEX):
             if not opened:
                 w("        <vertices>\n")
                 opened = True
             if identity:
                 x, y, z = _esc(v.get("x", "0")), _esc(v.get("y", "0")), _esc(v.get("z", "0"))
+                if measure:
+                    px, py, pz = float(v.get("x", "0")), float(v.get("y", "0")), float(v.get("z", "0"))
             else:
-                x, y, z = (
-                    _fmt(c)
-                    for c in xf.apply_point(
-                        float(v.get("x", "0")), float(v.get("y", "0")), float(v.get("z", "0"))
-                    )
+                px, py, pz = xf.apply_point(
+                    float(v.get("x", "0")), float(v.get("y", "0")), float(v.get("z", "0"))
                 )
+                x, y, z = _fmt(px), _fmt(py), _fmt(pz)
+            if measure:
+                placed_z = px * pm[2] + py * pm[5] + pz * pm[8]
+                z_min, z_max = min(z_min, placed_z), max(z_max, placed_z)
             w(f'          <vertex x="{x}" y="{y}" z="{z}"/>\n')
             vbase += 1
     w("        </vertices>\n" if opened else "        <vertices/>\n")
@@ -341,6 +356,7 @@ def _write_object(w, mo: _MergedObject, oid: str, objs, recode) -> None:
                 w(f"          <triangle {idx}/>\n")
     w("        </triangles>\n" if opened else "        <triangles/>\n")
     w("      </mesh>\n    </object>\n")
+    return z_max - z_min if z_max >= z_min else None
 
 
 def _paint_attr():
@@ -507,10 +523,18 @@ def write_prusa_3mf(
 
     warnings = Warnings()
     model_config = _build_model_config(project, merged, id_map, extruder_map, warnings)
-    if project.has_layer_height_profiles:
-        warnings.add("Variable layer height is not converted")
-    if project.has_layer_ranges:
-        warnings.add("Height range modifiers are not converted")
+    layer_ranges = _build_layer_ranges(project, merged, id_map, extruder_map, warnings)
+
+    # Where each object stands on the plate: its first build item.
+    placements: dict = {}
+    for bi in selected_items:
+        key = _key(ROOT_MODEL, bi.objectid)
+        if key in merged and key not in placements:
+            try:
+                placements[key] = Transform.parse(bi.transform)
+            except ValueError:
+                pass  # unreadable transform: no height, so no layer height profile
+    heights: dict = {}
 
     # Assemble the package.
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -522,11 +546,16 @@ def write_prusa_3mf(
             out.write(head)
             if mark:
                 for key, mo in merged.items():
-                    _write_object(out.write, mo, id_map[key], objs, recode)
+                    heights[key] = _write_object(out.write, mo, id_map[key], objs, recode, placements.get(key))
             out.write(tail)
             out.flush()
         if model_config:
             z.writestr("Metadata/Slic3r_PE_model.config", model_config)
+        profiles = _build_layer_height_profiles(project, merged, id_map, heights, warnings)
+        if profiles:
+            z.writestr("Metadata/Slic3r_PE_layer_heights_profile.txt", profiles)
+        if layer_ranges:
+            z.writestr("Metadata/Prusa_Slicer_layer_config_ranges.xml", layer_ranges)
         # Pass through a thumbnail if we have a plausible one.
         thumb = _pick_thumbnail(project)
         if thumb:
@@ -623,6 +652,95 @@ def _build_model_config(
     if len(root) == 0:
         return None
     return ET.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)
+
+
+def _object_name(project: BambuProject, key, mo: _MergedObject) -> str:
+    so = project.settings_objects.get(key[1])
+    return (so.name if so else "") or mo.name
+
+
+def _mm(v: float) -> str:
+    return f"{v:.3f}".rstrip("0").rstrip(".")
+
+
+def _build_layer_height_profiles(
+    project: BambuProject, merged: dict, id_map: dict, heights: dict, warnings: Warnings
+) -> str:
+    """PrusaSlicer's Slic3r_PE_layer_heights_profile.txt for the written objects.
+
+    The format is Bambu's: ``object_id=N|z;h;z;h;...``, N counting the objects in the
+    order they are written. Like both slicers, a profile is only used if it ends at the
+    top of the object (within 0.001 mm); one that doesn't (the object was changed after
+    the profile was made) is reported instead of written.
+    """
+    lines = []
+    for key, mo in merged.items():
+        profile = project.layer_height_profiles.get(key[1])
+        if not profile:
+            continue
+        name = _object_name(project, key, mo)
+        height = heights.get(key)
+        if height is None or abs(profile[-2] - height) > 1e-3:
+            shown = "" if height is None else f", the object is {_mm(height)} mm"
+            warnings.add(
+                f"Variable layer height was made for an object {_mm(profile[-2])} mm tall{shown}, not converted",
+                name,
+            )
+            continue
+        # PrusaSlicer prints the first layer at its own first layer height, then follows the profile.
+        # Bambu ignores a profile made for a different first layer, PrusaSlicer uses it anyway.
+        first = profile[1]
+        if project.first_layer_height and abs(first - project.first_layer_height) > 1e-6:
+            warnings.add(
+                f"Variable layer height was made for a first layer height of {_mm(first)} mm "
+                f"(the project uses {_mm(project.first_layer_height)} mm): "
+                f"set the first layer height to {_mm(first)} mm in PrusaSlicer",
+                name,
+            )
+        lines.append(f"object_id={id_map[key]}|" + ";".join(f"{v:f}" for v in profile))
+    return "".join(line + "\n" for line in lines)
+
+
+def _build_layer_ranges(
+    project: BambuProject,
+    merged: dict,
+    id_map: dict,
+    extruder_map: Optional[dict],
+    warnings: Warnings,
+) -> Optional[bytes]:
+    """PrusaSlicer's Prusa_Slicer_layer_config_ranges.xml: height ranges with their settings.
+
+    The layout is Bambu's, but the settings are translated: PrusaSlicer refuses to load a
+    project with a setting it doesn't know.
+    """
+    root = ET.Element("objects")
+    for key, mo in merged.items():
+        ranges = project.layer_ranges.get(key[1])
+        if not ranges:
+            continue
+        name = _object_name(project, key, mo)
+        obj_el = ET.SubElement(root, "object")
+        obj_el.set("id", id_map[key])
+        for min_z, max_z, options in ranges:
+            rng = ET.SubElement(obj_el, "range")
+            rng.set("min_z", _fmt(min_z))
+            rng.set("max_z", _fmt(max_z))
+            settings = {}
+            if "extruder" in options:
+                try:
+                    ext = int(options["extruder"])
+                    settings["extruder"] = str(extruder_map.get(ext, ext) if extruder_map and ext > 0 else ext)
+                except ValueError:
+                    pass
+            settings.update(translate(options, name, warnings, True, project.nozzle_diameter,
+                                      lambda f: extruder_map.get(f, f) if extruder_map else f))
+            for k, v in settings.items():
+                opt = ET.SubElement(rng, "option")
+                opt.set("opt_key", k)
+                opt.text = v
+    if len(root) == 0:
+        return None
+    return ET.tostring(root, xml_declaration=True, encoding="utf-8", pretty_print=True)
 
 
 def _rels_xml() -> str:

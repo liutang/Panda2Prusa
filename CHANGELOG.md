@@ -11,8 +11,12 @@
   widths in % of the nozzle → mm. Tree support styles become Organic, the Contour fuzzy
   skin becomes External. Brim ears and painted brims become no brim, an automatic brim is
   left to the print preset.
-- Settings that can't be converted, variable layer height and height range modifiers
-  are listed as warnings after the conversion, in the CLI, the GUI and the web app.
+- Variable layer height and height range modifiers are converted. A profile that no
+  longer fits its object (Bambu ignores it too) is left out with a warning; one made for a
+  different first layer height than the project's is kept, with a warning naming the first
+  layer height to set in PrusaSlicer.
+- Settings that can't be converted are listed as warnings after the conversion, in the
+  CLI, the GUI and the web app.
 - PrusaSlicer 2.x `.3mf` projects are accepted as input. They are copied as they are
   with their tool heads remapped: object/volume extruders, multi-material painting,
   layer-range extruders and tool changes move, and each filament's preset, color,

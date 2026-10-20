@@ -93,3 +93,56 @@ def test_object_and_modifier_settings_are_converted(tmp_path):
     assert settings(modifier, "volume")["fill_density"] == "40%"
     assert settings(modifier, "volume")["perimeters"] == "5"
     assert any("brim_ears" in w for w in result.stats.warnings)
+
+
+def _add_to_sample(path, entries):
+    with zipfile.ZipFile(path, "a") as z:
+        for name, data in entries.items():
+            z.writestr(name, data)
+
+
+def _converted(tmp_path, entries):
+    src, out = tmp_path / "in.3mf", tmp_path / "out.3mf"
+    _make_sample(src)
+    _add_to_sample(src, entries)
+    result = convert_file(str(src), str(out))
+    return result, zipfile.ZipFile(out)
+
+
+def test_layer_height_profile_that_fits_is_converted(tmp_path):
+    # The printed parts are 10 mm cubes; the first layer matches the project's.
+    result, z = _converted(tmp_path, {
+        "Metadata/layer_heights_profile.txt": "object_id=1|0.000000;0.200000;5.000000;0.100000;10.000000;0.100000\n",
+        "Metadata/project_settings.config": '{"initial_layer_print_height": "0.2"}',
+    })
+    assert z.read("Metadata/Slic3r_PE_layer_heights_profile.txt").decode() == (
+        "object_id=1|0.000000;0.200000;5.000000;0.100000;10.000000;0.100000\n")
+    assert not any("layer height" in w for w in result.stats.warnings)
+
+
+def test_layer_height_profile_for_another_first_layer_is_kept_with_a_warning(tmp_path):
+    result, z = _converted(tmp_path, {
+        "Metadata/layer_heights_profile.txt": "object_id=1|0;0.2;5;0.1;10;0.1\n",
+        "Metadata/project_settings.config": '{"initial_layer_print_height": "0.25"}',
+    })
+    assert "Metadata/Slic3r_PE_layer_heights_profile.txt" in z.namelist()
+    assert any("set the first layer height to 0.2 mm" in w for w in result.stats.warnings)
+
+
+def test_layer_height_profile_that_does_not_fit_is_left_out(tmp_path):
+    result, z = _converted(tmp_path, {"Metadata/layer_heights_profile.txt": "object_id=1|0;0.2;6;0.1;12;0.1\n"})
+    assert "Metadata/Slic3r_PE_layer_heights_profile.txt" not in z.namelist()
+    assert any("12 mm tall, the object is 10 mm" in w for w in result.stats.warnings)
+
+
+def test_height_ranges_are_converted_with_translated_settings(tmp_path):
+    result, z = _converted(tmp_path, {"Metadata/layer_config_ranges.xml": (
+        '<?xml version="1.0" encoding="utf-8"?><objects><object id="1"><range min_z="0" max_z="4">'
+        '<option opt_key="extruder">0</option><option opt_key="layer_height">0.12</option>'
+        '<option opt_key="wall_loops">4</option></range></object></objects>')})
+    ranges = ET.fromstring(z.read("Metadata/Prusa_Slicer_layer_config_ranges.xml"))
+    rng = ranges.find("object").find("range")
+    assert ranges.find("object").get("id") == "1"
+    assert (rng.get("min_z"), rng.get("max_z")) == ("0", "4")
+    assert {o.get("opt_key"): o.text for o in rng.findall("option")} == {
+        "extruder": "0", "layer_height": "0.12", "perimeters": "4"}

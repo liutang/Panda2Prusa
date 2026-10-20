@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- Modifiers, negative parts, support blockers and support enforcers keep their type.
+  Before, every part was written as a printed part, so a support blocker printed as a
+  solid block.
+- The settings of objects and parts (modifiers included) are converted: the Bambu keys and
+  values are translated to PrusaSlicer's where both mean the same, e.g. `wall_loops` →
+  `perimeters`, `sparse_infill_pattern` `zig-zag` → `fill_pattern` `rectilinear`, line
+  widths in % of the nozzle → mm. Tree support styles become Organic, the Contour fuzzy
+  skin becomes External. Brim ears and painted brims become no brim. Settings of the Locked
+  Zag infill, which Bambu Studio stores with every infill density, are left out quietly.
+- The automatic brim is worked out with OrcaSlicer's formula (how likely the object is to
+  tip over or warp, from its footprint, height, material and speed) and written as an outer
+  brim of that width, or no brim. Like OrcaSlicer, an object with supports or a raft gets
+  no brim, as Orca leaves out the brim where support covers the first layer.
+- Variable layer height and height range modifiers are converted. An object sunk into
+  the bed is measured from the bed up, as in both slicers. A profile that no
+  longer fits its object (Bambu ignores it too) is left out with a warning; one made for a
+  different first layer height than the project's is kept, with a warning naming the first
+  layer height to set in PrusaSlicer.
+- Settings that can't be converted are listed as warnings after the conversion, in the
+  CLI, the GUI and the web app.
 - PrusaSlicer 2.x `.3mf` projects are accepted as input. They are copied as they are
   with their tool heads remapped: object/volume extruders, multi-material painting,
   layer-range extruders and tool changes move, and each filament's preset, color,

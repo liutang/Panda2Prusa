@@ -16,6 +16,7 @@ TriangleSelector and the RLE bitstream format is shared.
 
 from __future__ import annotations
 
+import math
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -26,6 +27,8 @@ import lxml.etree as ET
 from . import ns
 from .paint import transform_states, used_states, PaintError
 from .reader import BambuProject, Part, ROOT_MODEL
+from .settings import FILAMENTS, Warnings, translate
+from . import autobrim
 from .transform import Transform
 
 # Attributes to strip from triangles (production + bambu extensions).
@@ -54,6 +57,7 @@ class WriteStats:
     painted_triangles: int = 0
     plates_included: Optional[list] = None
     extruder_map: Optional[dict] = None  # {bambu filament -> prusa extruder} if remapped
+    warnings: list = field(default_factory=list)  # what could not be converted, one line each
 
 
 @dataclass
@@ -63,6 +67,9 @@ class _Volume:
     leaf_oid: str
     name: str = ""
     extruder: Optional[str] = None
+    volume_type: str = "ModelPart"  # PrusaSlicer's name, see _VOLUME_TYPES
+    settings: dict = field(default_factory=dict)  # the Bambu part's metadata, settings included
+    leaf_idx: int = -1  # index into _MergedObject.leaves
 
 
 @dataclass
@@ -136,6 +143,25 @@ def _fmt(v: float) -> str:
     return repr(v)
 
 
+# Bambu Studio / OrcaSlicer part subtypes -> PrusaSlicer volume types.
+_VOLUME_TYPES = {
+    "normal_part": "ModelPart",
+    "modifier_part": "ParameterModifier",
+    "negative_part": "NegativeVolume",
+    "support_enforcer": "SupportEnforcer",
+    "support_blocker": "SupportBlocker",
+}
+
+
+def _volume_type(subtype: str) -> str:
+    """PrusaSlicer volume type for a Bambu/Orca part subtype.
+
+    Subtypes PrusaSlicer has no counterpart for (OrcaSlicer's precise seam volumes)
+    become modifiers without settings: kept, but neither printed nor changing the print.
+    """
+    return _VOLUME_TYPES.get(subtype, "ParameterModifier")
+
+
 def _plan_object(root_key, objs, src_path, parts: list) -> Optional[_MergedObject]:
     """Plan merging a build object's component tree into a single mesh.
 
@@ -180,6 +206,9 @@ def _plan_object(root_key, objs, src_path, parts: list) -> Optional[_MergedObjec
                     leaf_oid=leaf_key[1],
                     name=(part.name if part else "") or leaf.get("name", ""),
                     extruder=part.extruder if part else None,
+                    volume_type=_volume_type(part.subtype) if part else "ModelPart",
+                    settings=part.settings if part else {},
+                    leaf_idx=leaf_idx,
                 )
             )
     return merged
@@ -264,33 +293,47 @@ def _extra_triangle_attrs(t, recode) -> tuple[str, str]:
     return "".join(decls), "".join(parts)
 
 
-def _write_object(w, mo: _MergedObject, oid: str, objs, recode) -> None:
-    """Stream one merged <object>: all leaves' vertices, then all their triangles."""
+def _write_object(w, mo: _MergedObject, oid: str, objs, recode, placement=None) -> Optional[float]:
+    """Stream one merged <object>: all leaves' vertices, then all their triangles.
+
+    Returns the height above the bed of the object's printed parts as placed by
+    ``placement`` (the Transform of its first build item), which is what a layer height
+    profile spans. A part sunk into the bed is cut off at the bed, as in both slicers.
+    """
     name = f' name="{_esc(mo.name)}"' if mo.name else ""
     w(f'    <object type="model"{name} id="{oid}">\n      <mesh>\n')
+
+    # Only printed parts count for the height, not modifiers, negative volumes or blockers.
+    printed = {vol.leaf_idx for vol in mo.volumes if vol.volume_type == "ModelPart"}
+    pm = placement.m if placement is not None else None
+    z_min, z_max = float("inf"), float("-inf")
 
     vbases = []
     vbase = 0
     opened = False
-    for leaf_key, xf in mo.leaves:
+    for leaf_idx, (leaf_key, xf) in enumerate(mo.leaves):
         vbases.append(vbase)
         verts = objs[leaf_key].find(_MESH).find(_VERTICES)
         if verts is None:
             continue
         identity = xf.is_identity(tol=1e-9)
+        measure = pm is not None and leaf_idx in printed
         for v in verts.iterchildren(_VERTEX):
             if not opened:
                 w("        <vertices>\n")
                 opened = True
             if identity:
                 x, y, z = _esc(v.get("x", "0")), _esc(v.get("y", "0")), _esc(v.get("z", "0"))
+                if measure:
+                    px, py, pz = float(v.get("x", "0")), float(v.get("y", "0")), float(v.get("z", "0"))
             else:
-                x, y, z = (
-                    _fmt(c)
-                    for c in xf.apply_point(
-                        float(v.get("x", "0")), float(v.get("y", "0")), float(v.get("z", "0"))
-                    )
+                px, py, pz = xf.apply_point(
+                    float(v.get("x", "0")), float(v.get("y", "0")), float(v.get("z", "0"))
                 )
+                x, y, z = _fmt(px), _fmt(py), _fmt(pz)
+            if measure:
+                placed_z = px * pm[2] + py * pm[5] + pz * pm[8] + pm[11]
+                z_min, z_max = min(z_min, placed_z), max(z_max, placed_z)
             w(f'          <vertex x="{x}" y="{y}" z="{z}"/>\n')
             vbase += 1
     w("        </vertices>\n" if opened else "        <vertices/>\n")
@@ -316,6 +359,7 @@ def _write_object(w, mo: _MergedObject, oid: str, objs, recode) -> None:
                 w(f"          <triangle {idx}/>\n")
     w("        </triangles>\n" if opened else "        <triangles/>\n")
     w("      </mesh>\n    </object>\n")
+    return z_max - max(z_min, 0.0) if z_max >= z_min else None
 
 
 def _paint_attr():
@@ -328,15 +372,17 @@ def _used_filaments(project: BambuProject, merged: dict) -> set[int]:
     paint_strings: set[str] = set()
     for key, mo in merged.items():
         so = project.settings_objects.get(key[1])
-        if so and so.extruder:
-            try:
-                used.add(int(so.extruder))
-            except ValueError:
-                pass
-        for vol in mo.volumes:
-            if vol.extruder:
+        # Only parts and modifiers print with a filament.
+        printing = [vol for vol in mo.volumes if vol.volume_type in ("ModelPart", "ParameterModifier")]
+        extruders = [so.extruder] if so else []
+        extruders += [vol.extruder for vol in printing]
+        # Filaments of the supports, set for the object or a part.
+        for cfg in ([so.settings] if so else []) + [vol.settings for vol in printing]:
+            extruders += [cfg.get(k) for k in FILAMENTS]
+        for ext in extruders:
+            if ext:
                 try:
-                    used.add(int(vol.extruder))
+                    used.add(int(ext))
                 except ValueError:
                     pass
         paint_strings |= mo.paint_codes
@@ -478,7 +524,20 @@ def write_prusa_3mf(
     ).decode("utf-8")
     head, mark, tail = skeleton.partition(f"    <!--{_RESOURCES_MARK}-->\n")
 
-    model_config = _build_model_config(project, merged, id_map, extruder_map)
+    # Where each object stands on the plate: its first build item.
+    placements: dict = {}
+    for bi in selected_items:
+        key = _key(ROOT_MODEL, bi.objectid)
+        if key in merged and key not in placements:
+            try:
+                placements[key] = Transform.parse(bi.transform)
+            except ValueError:
+                pass  # unreadable transform: no height, so no layer height profile or auto brim
+    heights: dict = {}
+
+    warnings = Warnings()
+    model_config = _build_model_config(project, merged, id_map, extruder_map, warnings, objs, placements)
+    layer_ranges = _build_layer_ranges(project, merged, id_map, extruder_map, warnings)
 
     # Assemble the package.
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -490,11 +549,16 @@ def write_prusa_3mf(
             out.write(head)
             if mark:
                 for key, mo in merged.items():
-                    _write_object(out.write, mo, id_map[key], objs, recode)
+                    heights[key] = _write_object(out.write, mo, id_map[key], objs, recode, placements.get(key))
             out.write(tail)
             out.flush()
         if model_config:
             z.writestr("Metadata/Slic3r_PE_model.config", model_config)
+        profiles = _build_layer_height_profiles(project, merged, id_map, heights, warnings)
+        if profiles:
+            z.writestr("Metadata/Slic3r_PE_layer_heights_profile.txt", profiles)
+        if layer_ranges:
+            z.writestr("Metadata/Prusa_Slicer_layer_config_ranges.xml", layer_ranges)
         # Pass through a thumbnail if we have a plausible one.
         thumb = _pick_thumbnail(project)
         if thumb:
@@ -507,6 +571,7 @@ def write_prusa_3mf(
         painted_triangles=sum(mo.painted for mo in merged.values()),
         plates_included=plates,
         extruder_map=extruder_map,
+        warnings=warnings.lines(),
     )
 
 
@@ -536,13 +601,26 @@ def _cfg_meta(parent, mtype: str, mkey: str, value: str) -> None:
 
 
 def _build_model_config(
-    project: BambuProject, merged: dict, id_map: dict, extruder_map: Optional[dict] = None
+    project: BambuProject,
+    merged: dict,
+    id_map: dict,
+    extruder_map: Optional[dict] = None,
+    warnings: Optional[Warnings] = None,
+    objs: Optional[dict] = None,
+    placements: Optional[dict] = None,
 ) -> Optional[bytes]:
-    """Emit PrusaSlicer object/volume config: names + per-volume extruders.
+    """Emit PrusaSlicer object/volume config: names, types, extruders and settings.
 
     Volumes are identified by firstid/lastid triangle ranges over the merged mesh,
     matching PrusaSlicer's native writer, so extruder assignments survive import.
+    Settings PrusaSlicer has no equivalent for are left out and added to ``warnings``.
     """
+    if warnings is None:
+        warnings = Warnings()
+
+    def remap(f: int) -> int:
+        return extruder_map.get(f, f) if extruder_map else f
+
     root = ET.Element("config")
     for key, mo in merged.items():
         old_id = key[1]
@@ -560,17 +638,275 @@ def _build_model_config(
                 except ValueError:
                     pass
             _cfg_meta(obj_el, "object", "extruder", ext)
+        if so:
+            obj_settings = translate(so.settings, name, warnings, True, project.nozzle_diameter, remap)
+            if so.settings.get("brim_type") == "auto_brim":
+                obj_settings.update(_auto_brim(project, so, mo, objs, (placements or {}).get(key), name, warnings))
+            for k, v in obj_settings.items():
+                _cfg_meta(obj_el, "object", k, v)
         for vol in mo.volumes:
             vol_el = ET.SubElement(obj_el, "volume")
             vol_el.set("firstid", str(vol.firstid))
             vol_el.set("lastid", str(vol.lastid))
             _cfg_meta(vol_el, "volume", "name", vol.name or name or f"part {vol.leaf_oid}")
-            _cfg_meta(vol_el, "volume", "volume_type", "model_part")
+            _cfg_meta(vol_el, "volume", "volume_type", vol.volume_type)
             if vol.extruder:
                 _cfg_meta(vol_el, "volume", "extruder", vol.extruder)
+            # Negative volumes and support blockers or enforcers have no print settings.
+            if vol.volume_type in ("ModelPart", "ParameterModifier"):
+                part_settings = translate(vol.settings, name, warnings, False, project.nozzle_diameter, remap)
+                for k, v in part_settings.items():
+                    _cfg_meta(vol_el, "volume", k, v)
     if len(root) == 0:
         return None
     return ET.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)
+
+
+def _project_number(project: BambuProject, key: str, default: Optional[float] = None) -> Optional[float]:
+    """A number from the project settings; per-extruder lists give their first value."""
+    value = project.project_settings.get(key)
+    if isinstance(value, list):
+        value = value[0] if value else None
+    try:
+        return float(str(value).split(",")[0])
+    except (TypeError, ValueError):
+        return default
+
+
+def _max_speed(project: BambuProject, settings: dict) -> float:
+    """The fastest print speed of an object, as Orca's Model::findMaxSpeed works it out."""
+    base = {k: _project_number(project, k, 0.0) for k in autobrim.SPEED_KEYS}
+    speeds = dict(base)
+
+    def override(key):
+        try:
+            return float(str(settings[key]).split(",")[0])
+        except (KeyError, ValueError):
+            return None
+
+    if (inner := override("inner_wall_speed")) is not None:
+        speeds["inner_wall_speed"] = inner
+        if base["inner_wall_speed"]:
+            speeds["outer_wall_speed"] = base["outer_wall_speed"] / base["inner_wall_speed"] * inner
+    for k in autobrim.SPEED_KEYS:
+        if k != "inner_wall_speed" and (v := override(k)) is not None:
+            speeds[k] = v
+    fastest = max(speeds.values())
+    small = str(settings.get("small_perimeter_speed", "")).split(",")[0]
+    try:
+        fastest = max(fastest, speeds["outer_wall_speed"] * float(small[:-1]) / 100 if small.endswith("%") else float(small))
+    except ValueError:
+        pass
+    return fastest if fastest > 0 else 250.0
+
+
+def _has_support(project: BambuProject, so, mo: _MergedObject, objs) -> bool:
+    """Whether Orca prints support (or a raft) for an object: PrintObject::has_support_material.
+
+    With manual supports only, support is only made in support enforcers and painted
+    support areas, so an object without either has none.
+    """
+    def setting(key):
+        value = so.settings.get(key, project.project_settings.get(key))
+        if isinstance(value, list):
+            value = value[0] if value else None
+        return str(value if value is not None else "").split(",")[0].strip()
+
+    def number(key):
+        try:
+            return float(setting(key))
+        except ValueError:
+            return 0.0
+
+    if number("raft_layers") > 0 or number("enforce_support_layers") > 0:
+        return True
+    if setting("enable_support") not in ("1", "true"):
+        return False
+    if "manual" not in setting("support_type"):
+        return True
+    if any(vol.volume_type == "SupportEnforcer" for vol in mo.volumes):
+        return True
+    for leaf_key, _xf in mo.leaves:
+        tris = objs[leaf_key].find(_MESH).find(_TRIANGLES)
+        if tris is not None and any(t.get("paint_supports") for t in tris.iterchildren(_TRIANGLE)):
+            return True
+    return False
+
+
+def _auto_brim(project: BambuProject, so, mo: _MergedObject, objs, placement, name: str, warnings: Warnings) -> dict:
+    """PrusaSlicer brim settings for an object with Bambu's automatic brim."""
+    fallback = "Brim type auto_brim could not be worked out for this object, the brim is left to the print preset"
+    printed = [vol for vol in mo.volumes if vol.volume_type == "ModelPart"]
+    if placement is None or objs is None or not printed:
+        warnings.add(fallback, name)
+        return {}
+    flip_placement = placement.det3() < 0
+
+    # The printed parts' vertices as placed on the plate.
+    points, z_lows = {}, {}
+    for vol in printed:
+        leaf_key, xf = mo.leaves[vol.leaf_idx]
+        verts = objs[leaf_key].find(_MESH).find(_VERTICES)
+        pts = [] if verts is None else [
+            placement.apply_point(*xf.apply_point(float(v.get("x", "0")), float(v.get("y", "0")), float(v.get("z", "0"))))
+            for v in verts.iterchildren(_VERTEX)
+        ]
+        points[vol.leaf_idx] = pts
+        z_lows[vol.leaf_idx] = min((p[2] for p in pts), default=math.inf)
+    # A part sunk into the bed is printed from the bed up, as in both slicers.
+    z_min = max(min(z_lows.values()), 0.0)
+    z_max = max((p[2] for pts in points.values() for p in pts), default=-math.inf)
+    first_layer = project.first_layer_height or 0.2
+
+    # The footprint: a cut through the first layer.
+    cut = autobrim.FootprintBuilder(z_min + first_layer / 2)
+    for vol in printed:
+        leaf_key, xf = mo.leaves[vol.leaf_idx]
+        tris = objs[leaf_key].find(_MESH).find(_TRIANGLES)
+        pts = points[vol.leaf_idx]
+        if tris is None or z_lows[vol.leaf_idx] > cut.z:
+            continue
+        flip = (xf.det3() < 0) != flip_placement
+        for t in tris.iterchildren(_TRIANGLE):
+            try:
+                a, b, c = pts[int(t.get("v1"))], pts[int(t.get("v2"))], pts[int(t.get("v3"))]
+            except (TypeError, ValueError, IndexError):
+                continue
+            cut.add_triangle(a, c, b) if flip else cut.add_triangle(a, b, c)
+    footprint = cut.result()
+    if footprint is None:
+        warnings.add(fallback, name)
+        return {}
+
+    # Material of the parts on the bed: Orca takes the adhesion of the last one and the
+    # shortest thermal length of all of them.
+    adhesion, thermal_ref = 1.0, 1250.0
+    for vol in printed:
+        if z_lows[vol.leaf_idx] > z_min + first_layer:
+            continue
+        try:
+            filament = int(vol.settings.get("extruder") or so.extruder or 1) or 1
+        except ValueError:
+            filament = 1
+        types = project.filament_types
+        adhesion, thermal = autobrim.material(types[filament - 1] if 0 < filament <= len(types) else None)
+        thermal_ref = min(thermal_ref, thermal)
+
+    # Brim lines are first layer lines; Orca rounds the width to whole pairs of them.
+    nozzle = project.nozzle_diameter or 0.4
+    line = str(project.project_settings.get("initial_layer_line_width") or "").split(",")[0]
+    try:
+        line_width = nozzle * float(line[:-1]) / 100 if line.endswith("%") else float(line)
+    except ValueError:
+        line_width = 0.0
+    if line_width <= 0:
+        line_width = nozzle * 1.25
+    spacing = line_width - first_layer * (1 - math.pi / 4)
+
+    width = autobrim.brim_width(footprint, z_max - z_min, _max_speed(project, so.settings), adhesion, thermal_ref, spacing)
+    if width > 0 and _has_support(project, so, mo, objs):
+        # Orca clears the brim wherever support covers the first layer; PrusaSlicer would
+        # trim the support instead. Support matters more than the brim, so do as Orca does.
+        warnings.add(
+            f"Brim type auto_brim worked out to a {_mm(width)} mm outer brim, left out because the object has "
+            "supports: OrcaSlicer leaves out the brim where support covers the first layer",
+            name,
+        )
+        return {"brim_type": "no_brim"}
+    if width <= 0:
+        warnings.add("Brim type auto_brim worked out to no brim, as in OrcaSlicer", name)
+        return {"brim_type": "no_brim"}
+    warnings.add(f"Brim type auto_brim worked out to a {_mm(width)} mm outer brim, as in OrcaSlicer (approximated)", name)
+    return {"brim_type": "outer_only", "brim_width": _mm(width)}
+
+
+def _object_name(project: BambuProject, key, mo: _MergedObject) -> str:
+    so = project.settings_objects.get(key[1])
+    return (so.name if so else "") or mo.name
+
+
+def _mm(v: float) -> str:
+    return f"{v:.3f}".rstrip("0").rstrip(".")
+
+
+def _build_layer_height_profiles(
+    project: BambuProject, merged: dict, id_map: dict, heights: dict, warnings: Warnings
+) -> str:
+    """PrusaSlicer's Slic3r_PE_layer_heights_profile.txt for the written objects.
+
+    The format is Bambu's: ``object_id=N|z;h;z;h;...``, N counting the objects in the
+    order they are written. Like both slicers, a profile is only used if it ends at the
+    top of the object (within 0.001 mm); one that doesn't (the object was changed after
+    the profile was made) is reported instead of written.
+    """
+    lines = []
+    for key, mo in merged.items():
+        profile = project.layer_height_profiles.get(key[1])
+        if not profile:
+            continue
+        name = _object_name(project, key, mo)
+        height = heights.get(key)
+        if height is None or abs(profile[-2] - height) > 1e-3:
+            shown = "" if height is None else f", the object is {_mm(height)} mm"
+            warnings.add(
+                f"Variable layer height was made for an object {_mm(profile[-2])} mm tall{shown}, not converted",
+                name,
+            )
+            continue
+        # PrusaSlicer prints the first layer at its own first layer height, then follows the profile.
+        # Bambu ignores a profile made for a different first layer, PrusaSlicer uses it anyway.
+        first = profile[1]
+        if project.first_layer_height and abs(first - project.first_layer_height) > 1e-6:
+            warnings.add(
+                f"Variable layer height was made for a first layer height of {_mm(first)} mm "
+                f"(the project uses {_mm(project.first_layer_height)} mm): "
+                f"set the first layer height to {_mm(first)} mm in PrusaSlicer",
+                name,
+            )
+        lines.append(f"object_id={id_map[key]}|" + ";".join(f"{v:f}" for v in profile))
+    return "".join(line + "\n" for line in lines)
+
+
+def _build_layer_ranges(
+    project: BambuProject,
+    merged: dict,
+    id_map: dict,
+    extruder_map: Optional[dict],
+    warnings: Warnings,
+) -> Optional[bytes]:
+    """PrusaSlicer's Prusa_Slicer_layer_config_ranges.xml: height ranges with their settings.
+
+    The layout is Bambu's, but the settings are translated: PrusaSlicer refuses to load a
+    project with a setting it doesn't know.
+    """
+    root = ET.Element("objects")
+    for key, mo in merged.items():
+        ranges = project.layer_ranges.get(key[1])
+        if not ranges:
+            continue
+        name = _object_name(project, key, mo)
+        obj_el = ET.SubElement(root, "object")
+        obj_el.set("id", id_map[key])
+        for min_z, max_z, options in ranges:
+            rng = ET.SubElement(obj_el, "range")
+            rng.set("min_z", _fmt(min_z))
+            rng.set("max_z", _fmt(max_z))
+            settings = {}
+            if "extruder" in options:
+                try:
+                    ext = int(options["extruder"])
+                    settings["extruder"] = str(extruder_map.get(ext, ext) if extruder_map and ext > 0 else ext)
+                except ValueError:
+                    pass
+            settings.update(translate(options, name, warnings, True, project.nozzle_diameter,
+                                      lambda f: extruder_map.get(f, f) if extruder_map else f))
+            for k, v in settings.items():
+                opt = ET.SubElement(rng, "option")
+                opt.set("opt_key", k)
+                opt.text = v
+    if len(root) == 0:
+        return None
+    return ET.tostring(root, xml_declaration=True, encoding="utf-8", pretty_print=True)
 
 
 def _rels_xml() -> str:

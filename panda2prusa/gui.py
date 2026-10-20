@@ -221,6 +221,8 @@ class App:
                 f"{s.build_items_written} build items, "
                 f"{s.painted_triangles} painted triangles.{remap}"
             ))
+            for line in s.warnings:
+                self.master.after(0, lambda line=line: self._log(f"Warning: {line}"))
         except Exception:
             err = traceback.format_exc()
             self.master.after(0, lambda: self._log("ERROR:\n" + err))

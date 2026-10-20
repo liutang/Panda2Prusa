@@ -32,7 +32,7 @@ PARTS = [
 ]
 
 
-def _make_sample(path):
+def _make_sample(path, brim="brim_ears", scale=1, z=0, enable_support="0"):
     leaves = "".join(f'<object id="{i + 1}" type="model">{_cube(i * 20)}</object>' for i in range(len(PARTS)))
     objs = f'<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="{C}"><resources>{leaves}</resources><build/></model>'
     comps = "".join(
@@ -41,7 +41,7 @@ def _make_sample(path):
     root = f'''<?xml version="1.0" encoding="UTF-8"?><model unit="millimeter" xmlns="{C}" xmlns:p="{P}" requiredextensions="p">
     <metadata name="Application">BambuStudio-01.10.00.00</metadata><resources>
     <object id="100" type="model"><components>{comps}</components></object>
-    </resources><build><item objectid="100" transform="1 0 0 0 1 0 0 0 1 100 100 0" printable="1"/></build></model>'''
+    </resources><build><item objectid="100" transform="{scale} 0 0 0 {scale} 0 0 0 {scale} 100 100 {z}" printable="1"/></build></model>'''
     rels = ('<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
             '<Relationship Target="/3D/Objects/object_1.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/></Relationships>')
     parts = "".join(
@@ -52,7 +52,7 @@ def _make_sample(path):
     )
     ms = f'''<?xml version="1.0"?><config>
     <object id="100"><metadata key="name" value="Obj"/><metadata key="extruder" value="1"/>
-    <metadata key="enable_support" value="0"/><metadata key="brim_type" value="brim_ears"/>{parts}</object>
+    <metadata key="enable_support" value="{enable_support}"/><metadata key="brim_type" value="{brim}"/>{parts}</object>
     <plate><metadata key="plater_id" value="1"/><model_instance><metadata key="object_id" value="100"/></model_instance></plate></config>'''
     with zipfile.ZipFile(path, "w") as z:
         z.writestr("3D/3dmodel.model", root)
@@ -146,3 +146,13 @@ def test_height_ranges_are_converted_with_translated_settings(tmp_path):
     assert (rng.get("min_z"), rng.get("max_z")) == ("0", "4")
     assert {o.get("opt_key"): o.text for o in rng.findall("option")} == {
         "extruder": "0", "layer_height": "0.12", "perimeters": "4"}
+
+
+def test_layer_height_profile_of_a_sunk_object_spans_the_part_above_the_bed(tmp_path):
+    # The 10 mm cubes are sunk 0.5 mm into the bed: 9.5 mm is printed.
+    src, out = tmp_path / "in.3mf", tmp_path / "out.3mf"
+    _make_sample(src, z=-0.5)
+    _add_to_sample(src, {"Metadata/layer_heights_profile.txt": "object_id=1|0;0.2;5;0.1;9.5;0.1\n"})
+    result = convert_file(str(src), str(out))
+    assert "Metadata/Slic3r_PE_layer_heights_profile.txt" in zipfile.ZipFile(out).namelist()
+    assert not any("layer height" in w for w in result.stats.warnings)

@@ -69,6 +69,7 @@ class BambuProject:
     filament_types: list = field(default_factory=list)  # e.g. ["PLA", "PETG", ...]
     nozzle_diameter: Optional[float] = None  # of the first nozzle, for line widths in %
     first_layer_height: Optional[float] = None  # initial_layer_print_height of the project
+    project_settings: dict = field(default_factory=dict)  # Metadata/project_settings.config
     # Variable layer height: root object id -> [z0, h0, z1, h1, ...] from the object's bottom.
     layer_height_profiles: dict = field(default_factory=dict)
     # Height range modifiers: root object id -> [(min_z, max_z, {setting: value})].
@@ -168,10 +169,13 @@ def read_bambu_3mf(path: str) -> BambuProject:
         filament_types: list[str] = []
         nozzle_diameter: Optional[float] = None
         first_layer_height: Optional[float] = None
+        project_settings: dict = {}
         ps_name = "Metadata/project_settings.config"
         if ps_name in names:
             try:
                 ps = json.loads(z.read(ps_name))
+                if isinstance(ps, dict):
+                    project_settings = ps
                 filament_colors = [str(c) for c in ps.get("filament_colour") or []]
                 filament_types = [str(t) for t in ps.get("filament_type") or []]
                 nozzles = ps.get("nozzle_diameter") or []
@@ -217,6 +221,7 @@ def read_bambu_3mf(path: str) -> BambuProject:
         filament_types=filament_types,
         nozzle_diameter=nozzle_diameter,
         first_layer_height=first_layer_height,
+        project_settings=project_settings,
         layer_height_profiles=layer_height_profiles,
         layer_ranges=layer_ranges,
     )

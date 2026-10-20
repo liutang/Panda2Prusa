@@ -48,8 +48,8 @@ def test_brim_types():
         out, warnings = _object({"brim_type": value})
         assert out == {"brim_type": "no_brim"}
         assert len(warnings) == 1 and "removed" in warnings[0]
-    out, warnings = _object({"brim_type": "auto_brim"})
-    assert out == {} and len(warnings) == 1 and "print preset" in warnings[0]
+    # Auto brim is worked out from the geometry by the writer, see test_autobrim.py.
+    assert _object({"brim_type": "auto_brim"}) == ({}, [])
 
 
 def test_ironing_type_also_switches_ironing():
@@ -97,6 +97,18 @@ def test_whole_object_settings_are_not_set_on_parts():
 
 def test_unknown_settings_are_reported_once_per_message():
     w = Warnings()
-    translate({"skin_infill_density": "6%"}, "A", w, True)
-    translate({"skin_infill_density": "6%"}, "B", w, True)
-    assert w.lines() == ['Setting skin_infill_density = 6% has no PrusaSlicer equivalent, not converted ("A", "B")']
+    translate({"support_critical_regions_only": "1"}, "A", w, True)
+    translate({"support_critical_regions_only": "1"}, "B", w, True)
+    assert w.lines() == [
+        'Setting support_critical_regions_only = 1 has no PrusaSlicer equivalent, not converted ("A", "B")']
+
+
+def test_locked_zag_settings_are_dropped_without_a_warning():
+    # Bambu Studio stores them next to the infill density whatever the pattern.
+    out, warnings = _object({"sparse_infill_density": "10%", "skin_infill_density": "10%",
+                             "skeleton_infill_density": "10%"})
+    assert out == {"fill_density": "10%"} and warnings == []
+    # Locked Zag itself is still reported, once.
+    out, warnings = _object({"sparse_infill_pattern": "lockedzag", "skin_infill_density": "20%",
+                             "infill_lock_depth": "2"})
+    assert out == {} and len(warnings) == 1 and "lockedzag" in warnings[0]

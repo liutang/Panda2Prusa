@@ -401,7 +401,7 @@ $("convert").addEventListener("click", async () => {
       text += " Tools: " + Object.entries(stats.extruder_map).map(([k, v]) => `${k}→${v}`).join(", ") + ".";
     res.replaceChildren(text, el("br"), "Download didn't start? ", a);
     if (stats.warnings && stats.warnings.length)
-      res.append(el("p", { textContent: "Not converted:" }),
+      res.append(el("p", { textContent: "Warnings:" }),
                  el("ul", {}, ...stats.warnings.map(w => el("li", { textContent: w }))));
     res.classList.add("ok"); res.hidden = false;
   } catch (e) {

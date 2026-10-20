@@ -16,6 +16,7 @@ TriangleSelector and the RLE bitstream format is shared.
 
 from __future__ import annotations
 
+import math
 import re
 import zipfile
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from . import ns
 from .paint import transform_states, used_states, PaintError
 from .reader import BambuProject, Part, ROOT_MODEL
 from .settings import FILAMENTS, Warnings, translate
+from . import autobrim
 from .transform import Transform
 
 # Attributes to strip from triangles (production + bambu extensions).
@@ -294,8 +296,9 @@ def _extra_triangle_attrs(t, recode) -> tuple[str, str]:
 def _write_object(w, mo: _MergedObject, oid: str, objs, recode, placement=None) -> Optional[float]:
     """Stream one merged <object>: all leaves' vertices, then all their triangles.
 
-    Returns the height of the object's printed parts as placed by ``placement`` (the
-    Transform of its first build item), which is what a layer height profile spans.
+    Returns the height above the bed of the object's printed parts as placed by
+    ``placement`` (the Transform of its first build item), which is what a layer height
+    profile spans. A part sunk into the bed is cut off at the bed, as in both slicers.
     """
     name = f' name="{_esc(mo.name)}"' if mo.name else ""
     w(f'    <object type="model"{name} id="{oid}">\n      <mesh>\n')
@@ -329,7 +332,7 @@ def _write_object(w, mo: _MergedObject, oid: str, objs, recode, placement=None) 
                 )
                 x, y, z = _fmt(px), _fmt(py), _fmt(pz)
             if measure:
-                placed_z = px * pm[2] + py * pm[5] + pz * pm[8]
+                placed_z = px * pm[2] + py * pm[5] + pz * pm[8] + pm[11]
                 z_min, z_max = min(z_min, placed_z), max(z_max, placed_z)
             w(f'          <vertex x="{x}" y="{y}" z="{z}"/>\n')
             vbase += 1
@@ -356,7 +359,7 @@ def _write_object(w, mo: _MergedObject, oid: str, objs, recode, placement=None) 
                 w(f"          <triangle {idx}/>\n")
     w("        </triangles>\n" if opened else "        <triangles/>\n")
     w("      </mesh>\n    </object>\n")
-    return z_max - z_min if z_max >= z_min else None
+    return z_max - max(z_min, 0.0) if z_max >= z_min else None
 
 
 def _paint_attr():
@@ -521,10 +524,6 @@ def write_prusa_3mf(
     ).decode("utf-8")
     head, mark, tail = skeleton.partition(f"    <!--{_RESOURCES_MARK}-->\n")
 
-    warnings = Warnings()
-    model_config = _build_model_config(project, merged, id_map, extruder_map, warnings)
-    layer_ranges = _build_layer_ranges(project, merged, id_map, extruder_map, warnings)
-
     # Where each object stands on the plate: its first build item.
     placements: dict = {}
     for bi in selected_items:
@@ -533,8 +532,12 @@ def write_prusa_3mf(
             try:
                 placements[key] = Transform.parse(bi.transform)
             except ValueError:
-                pass  # unreadable transform: no height, so no layer height profile
+                pass  # unreadable transform: no height, so no layer height profile or auto brim
     heights: dict = {}
+
+    warnings = Warnings()
+    model_config = _build_model_config(project, merged, id_map, extruder_map, warnings, objs, placements)
+    layer_ranges = _build_layer_ranges(project, merged, id_map, extruder_map, warnings)
 
     # Assemble the package.
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -603,6 +606,8 @@ def _build_model_config(
     id_map: dict,
     extruder_map: Optional[dict] = None,
     warnings: Optional[Warnings] = None,
+    objs: Optional[dict] = None,
+    placements: Optional[dict] = None,
 ) -> Optional[bytes]:
     """Emit PrusaSlicer object/volume config: names, types, extruders and settings.
 
@@ -634,7 +639,10 @@ def _build_model_config(
                     pass
             _cfg_meta(obj_el, "object", "extruder", ext)
         if so:
-            for k, v in translate(so.settings, name, warnings, True, project.nozzle_diameter, remap).items():
+            obj_settings = translate(so.settings, name, warnings, True, project.nozzle_diameter, remap)
+            if so.settings.get("brim_type") == "auto_brim":
+                obj_settings.update(_auto_brim(project, so, mo, objs, (placements or {}).get(key), name, warnings))
+            for k, v in obj_settings.items():
                 _cfg_meta(obj_el, "object", k, v)
         for vol in mo.volumes:
             vol_el = ET.SubElement(obj_el, "volume")
@@ -652,6 +660,164 @@ def _build_model_config(
     if len(root) == 0:
         return None
     return ET.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)
+
+
+def _project_number(project: BambuProject, key: str, default: Optional[float] = None) -> Optional[float]:
+    """A number from the project settings; per-extruder lists give their first value."""
+    value = project.project_settings.get(key)
+    if isinstance(value, list):
+        value = value[0] if value else None
+    try:
+        return float(str(value).split(",")[0])
+    except (TypeError, ValueError):
+        return default
+
+
+def _max_speed(project: BambuProject, settings: dict) -> float:
+    """The fastest print speed of an object, as Orca's Model::findMaxSpeed works it out."""
+    base = {k: _project_number(project, k, 0.0) for k in autobrim.SPEED_KEYS}
+    speeds = dict(base)
+
+    def override(key):
+        try:
+            return float(str(settings[key]).split(",")[0])
+        except (KeyError, ValueError):
+            return None
+
+    if (inner := override("inner_wall_speed")) is not None:
+        speeds["inner_wall_speed"] = inner
+        if base["inner_wall_speed"]:
+            speeds["outer_wall_speed"] = base["outer_wall_speed"] / base["inner_wall_speed"] * inner
+    for k in autobrim.SPEED_KEYS:
+        if k != "inner_wall_speed" and (v := override(k)) is not None:
+            speeds[k] = v
+    fastest = max(speeds.values())
+    small = str(settings.get("small_perimeter_speed", "")).split(",")[0]
+    try:
+        fastest = max(fastest, speeds["outer_wall_speed"] * float(small[:-1]) / 100 if small.endswith("%") else float(small))
+    except ValueError:
+        pass
+    return fastest if fastest > 0 else 250.0
+
+
+def _has_support(project: BambuProject, so, mo: _MergedObject, objs) -> bool:
+    """Whether Orca prints support (or a raft) for an object: PrintObject::has_support_material.
+
+    With manual supports only, support is only made in support enforcers and painted
+    support areas, so an object without either has none.
+    """
+    def setting(key):
+        value = so.settings.get(key, project.project_settings.get(key))
+        if isinstance(value, list):
+            value = value[0] if value else None
+        return str(value if value is not None else "").split(",")[0].strip()
+
+    def number(key):
+        try:
+            return float(setting(key))
+        except ValueError:
+            return 0.0
+
+    if number("raft_layers") > 0 or number("enforce_support_layers") > 0:
+        return True
+    if setting("enable_support") not in ("1", "true"):
+        return False
+    if "manual" not in setting("support_type"):
+        return True
+    if any(vol.volume_type == "SupportEnforcer" for vol in mo.volumes):
+        return True
+    for leaf_key, _xf in mo.leaves:
+        tris = objs[leaf_key].find(_MESH).find(_TRIANGLES)
+        if tris is not None and any(t.get("paint_supports") for t in tris.iterchildren(_TRIANGLE)):
+            return True
+    return False
+
+
+def _auto_brim(project: BambuProject, so, mo: _MergedObject, objs, placement, name: str, warnings: Warnings) -> dict:
+    """PrusaSlicer brim settings for an object with Bambu's automatic brim."""
+    fallback = "Brim type auto_brim could not be worked out for this object, the brim is left to the print preset"
+    printed = [vol for vol in mo.volumes if vol.volume_type == "ModelPart"]
+    if placement is None or objs is None or not printed:
+        warnings.add(fallback, name)
+        return {}
+    flip_placement = placement.det3() < 0
+
+    # The printed parts' vertices as placed on the plate.
+    points, z_lows = {}, {}
+    for vol in printed:
+        leaf_key, xf = mo.leaves[vol.leaf_idx]
+        verts = objs[leaf_key].find(_MESH).find(_VERTICES)
+        pts = [] if verts is None else [
+            placement.apply_point(*xf.apply_point(float(v.get("x", "0")), float(v.get("y", "0")), float(v.get("z", "0"))))
+            for v in verts.iterchildren(_VERTEX)
+        ]
+        points[vol.leaf_idx] = pts
+        z_lows[vol.leaf_idx] = min((p[2] for p in pts), default=math.inf)
+    # A part sunk into the bed is printed from the bed up, as in both slicers.
+    z_min = max(min(z_lows.values()), 0.0)
+    z_max = max((p[2] for pts in points.values() for p in pts), default=-math.inf)
+    first_layer = project.first_layer_height or 0.2
+
+    # The footprint: a cut through the first layer.
+    cut = autobrim.FootprintBuilder(z_min + first_layer / 2)
+    for vol in printed:
+        leaf_key, xf = mo.leaves[vol.leaf_idx]
+        tris = objs[leaf_key].find(_MESH).find(_TRIANGLES)
+        pts = points[vol.leaf_idx]
+        if tris is None or z_lows[vol.leaf_idx] > cut.z:
+            continue
+        flip = (xf.det3() < 0) != flip_placement
+        for t in tris.iterchildren(_TRIANGLE):
+            try:
+                a, b, c = pts[int(t.get("v1"))], pts[int(t.get("v2"))], pts[int(t.get("v3"))]
+            except (TypeError, ValueError, IndexError):
+                continue
+            cut.add_triangle(a, c, b) if flip else cut.add_triangle(a, b, c)
+    footprint = cut.result()
+    if footprint is None:
+        warnings.add(fallback, name)
+        return {}
+
+    # Material of the parts on the bed: Orca takes the adhesion of the last one and the
+    # shortest thermal length of all of them.
+    adhesion, thermal_ref = 1.0, 1250.0
+    for vol in printed:
+        if z_lows[vol.leaf_idx] > z_min + first_layer:
+            continue
+        try:
+            filament = int(vol.settings.get("extruder") or so.extruder or 1) or 1
+        except ValueError:
+            filament = 1
+        types = project.filament_types
+        adhesion, thermal = autobrim.material(types[filament - 1] if 0 < filament <= len(types) else None)
+        thermal_ref = min(thermal_ref, thermal)
+
+    # Brim lines are first layer lines; Orca rounds the width to whole pairs of them.
+    nozzle = project.nozzle_diameter or 0.4
+    line = str(project.project_settings.get("initial_layer_line_width") or "").split(",")[0]
+    try:
+        line_width = nozzle * float(line[:-1]) / 100 if line.endswith("%") else float(line)
+    except ValueError:
+        line_width = 0.0
+    if line_width <= 0:
+        line_width = nozzle * 1.25
+    spacing = line_width - first_layer * (1 - math.pi / 4)
+
+    width = autobrim.brim_width(footprint, z_max - z_min, _max_speed(project, so.settings), adhesion, thermal_ref, spacing)
+    if width > 0 and _has_support(project, so, mo, objs):
+        # Orca clears the brim wherever support covers the first layer; PrusaSlicer would
+        # trim the support instead. Support matters more than the brim, so do as Orca does.
+        warnings.add(
+            f"Brim type auto_brim worked out to a {_mm(width)} mm outer brim, left out because the object has "
+            "supports: OrcaSlicer leaves out the brim where support covers the first layer",
+            name,
+        )
+        return {"brim_type": "no_brim"}
+    if width <= 0:
+        warnings.add("Brim type auto_brim worked out to no brim, as in OrcaSlicer", name)
+        return {"brim_type": "no_brim"}
+    warnings.add(f"Brim type auto_brim worked out to a {_mm(width)} mm outer brim, as in OrcaSlicer (approximated)", name)
+    return {"brim_type": "outer_only", "brim_width": _mm(width)}
 
 
 def _object_name(project: BambuProject, key, mo: _MergedObject) -> str:

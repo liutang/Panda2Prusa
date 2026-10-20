@@ -22,6 +22,14 @@ NOT_SETTINGS = {
     "source_in_inches", "source_in_meters",
 }
 
+# Settings of Bambu's Locked Zag infill only, which PrusaSlicer doesn't have. Bambu Studio
+# copies the infill density into the two densities whenever it changes, so they show up
+# with any pattern; a project that does use Locked Zag gets a warning for the pattern.
+LOCKED_ZAG_ONLY = {
+    "skin_infill_density", "skeleton_infill_density", "infill_lock_depth", "skin_infill_depth",
+    "skin_infill_line_width", "skeleton_infill_line_width",
+}
+
 # Same meaning and value format, only the key differs (or not even that).
 RENAMED = {
     # Walls, shells, infill
@@ -262,7 +270,7 @@ def translate(
         warnings.add(f"Setting {key} = {value} {why}, not converted", obj)
 
     for key, raw in settings.items():
-        if key in NOT_SETTINGS or key in ("support_type", "support_style"):
+        if key in NOT_SETTINGS or key in LOCKED_ZAG_ONLY or key in ("support_type", "support_style"):
             continue
         value = _first_value(raw)
         if key in RENAMED:
@@ -309,7 +317,7 @@ def translate(
                 out["brim_type"] = "no_brim"
                 warnings.add(f"Brim type {value} has no PrusaSlicer equivalent, the brim was removed", obj)
             elif value == "auto_brim":
-                warnings.add("Brim type auto_brim has no PrusaSlicer equivalent, the brim is left to the print preset", obj)
+                pass  # computed from the object's geometry by the writer, see autobrim.py
             else:
                 drop(key, value)
         elif key == "small_perimeter_speed":
